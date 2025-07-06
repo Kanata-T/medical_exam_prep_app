@@ -102,19 +102,22 @@ site:pubmed.ncbi.nlm.nih.gov {keywords}"""
         
         # 引用情報の抽出
         citations = []
-        if (response.candidates and 
-            hasattr(response.candidates[0], 'grounding_metadata') and 
-            response.candidates[0].grounding_metadata):
-            
+        if (response.candidates and
+            len(response.candidates) > 0 and
+            hasattr(response.candidates[0], 'grounding_metadata') and
+            response.candidates[0].grounding_metadata and
+            hasattr(response.candidates[0].grounding_metadata, 'grounding_chunks') and
+            response.candidates[0].grounding_metadata.grounding_chunks):
+
             for chunk in response.candidates[0].grounding_metadata.grounding_chunks:
-                if (hasattr(chunk, 'web') and 
-                    hasattr(chunk.web, 'uri') and 
-                    hasattr(chunk.web, 'title')):
-                    
+                if (hasattr(chunk, 'web') and chunk.web and
+                    hasattr(chunk.web, 'uri') and chunk.web.uri and
+                    hasattr(chunk.web, 'title') and chunk.web.title):
+
                     # PubMedリンクのみを抽出
                     if 'pubmed' in chunk.web.uri.lower():
                         citations.append({
-                            "uri": chunk.web.uri, 
+                            "uri": chunk.web.uri,
                             "title": chunk.web.title
                         })
         
