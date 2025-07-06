@@ -1,0 +1,27 @@
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Cache / logs
+audio_cache/
+history/
+session_backup/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Streamlit
+.streamlit/secrets.toml
