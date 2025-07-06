@@ -185,7 +185,7 @@ def check_api_configuration():
         
         # APIキーの基本的な形式チェック
         if not api_key.strip() or len(api_key.strip()) < 30:
-            return False, "APIキ���の形式が正しくありません。有効なGoogle Gemini APIキーを設定してください。"
+            return False, "APIキーの形式が正しくありません。有効なGoogle Gemini APIキーを設定してください。"
         
         return True, "APIキーが設定されています。"
             

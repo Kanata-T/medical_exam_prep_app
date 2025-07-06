@@ -144,7 +144,7 @@ def render_scoring_and_feedback():
     # 履歴保存
     try:
         history_data = {
-            "type": "自由���述",
+            "type": "自由記述",
             "date": s['start_time'].isoformat(),
             "inputs": {
                 "theme": s['theme'],
