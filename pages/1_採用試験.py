@@ -179,8 +179,17 @@ if st.session_state.exam_step == 'setup':
     st.markdown('<div class="task-card">', unsafe_allow_html=True)
     st.markdown("### 論文検索設定")
     
-    # サンプルキーワードの表示
-    with st.expander("サンプルキーワード", expanded=False):
+    # サンプルキーワードとAI生成の説明
+    with st.expander("🤖 AIによる自動キーワード生成について", expanded=False):
+        st.markdown("""
+        **AIによる自動生成の特徴:**
+        - 医師国家試験の出題範囲内から選択
+        - 臨床的に重要度の高い分野を優先
+        - 最新の医学研究動向を反映
+        - PubMedで高品質な論文が見つかりやすいキーワード
+        
+        **参考：従来のサンプルキーワード**
+        """)
         sample_keywords = get_sample_keywords()
         cols = st.columns(3)
         for i, keyword in enumerate(sample_keywords):
@@ -191,17 +200,23 @@ if st.session_state.exam_step == 'setup':
     
     # キーワード入力
     keywords = st.text_input(
-        "検索したい論文のキーワードを入力してください",
+        "検索したい論文のキーワードを入力してください（空白の場合はAIが自動選択）",
         value=st.session_state.get('search_keywords', ''),
         placeholder="例: diabetes mellitus, hypertension, COVID-19",
-        help="医学論文のPubMed検索に使用するキーワードを英語で入力してください"
+        help="医学論文のPubMed検索に使用するキーワードを英語で入力してください。空白の場合、AIが医師国家試験範囲内から臨床的に重要なキーワードを自動選択します。"
     )
     
     # 試験開始ボタン
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.button("試験開始（60分）", type="primary", use_container_width=True):
-            with st.spinner("論文とテーマを準備中...（30秒程度かかります）"):
+            loading_message = "論文とテーマを準備中..."
+            if not keywords.strip():
+                loading_message += "（AIがキーワードを自動選択中...約45秒）"
+            else:
+                loading_message += "（約30秒）"
+                
+            with st.spinner(loading_message):
                 # 論文検索
                 paper_result = find_medical_paper(keywords)
                 if 'error' in paper_result:
@@ -219,9 +234,12 @@ if st.session_state.exam_step == 'setup':
                 st.session_state.essay_theme = theme_result['theme']
                 st.session_state.start_time = time.time()
                 st.session_state.exam_step = 'running'
-                st.session_state.search_keywords = keywords
+                st.session_state.search_keywords = paper_result.get('keywords_used', keywords)
                 
-            st.success("準備完了！試験を開始します。")
+            success_msg = "準備完了！試験を開始します。"
+            if not keywords.strip():
+                success_msg += f"\n選択されたキーワード: `{paper_result.get('keywords_used', '')}`"
+            st.success(success_msg)
             time.sleep(1)
             st.rerun()
     
@@ -277,19 +295,45 @@ elif st.session_state.exam_step == 'running':
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("#### 英語Abstract")
+            st.markdown("#### 📄 論文情報")
             if st.session_state.paper_data and 'abstract' in st.session_state.paper_data:
+                # 論文タイトル
+                paper_title = st.session_state.paper_data.get('title', '(タイトル不明)')
+                st.markdown("##### 📋 タイトル")
+                st.markdown(f"**{paper_title}**")
+                
+                # 研究種別とキーワード情報
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    study_type = st.session_state.paper_data.get('study_type', '不明')
+                    st.markdown(f"**研究種別:** {study_type}")
+                with col_info2:
+                    relevance = st.session_state.paper_data.get('relevance_score', 'N/A')
+                    st.markdown(f"**関連度:** {relevance}/10")
+                
+                keywords_used = st.session_state.paper_data.get('keywords_used', '')
+                if keywords_used:
+                    st.markdown(f"**検索キーワード:** `{keywords_used}`")
+                
+                st.markdown("---")
+                
+                # Abstract
+                st.markdown("##### 📖 Abstract")
                 abstract_text = st.session_state.paper_data['abstract']
                 st.markdown(f'<div class="abstract-container">{abstract_text}</div>', unsafe_allow_html=True)
                 
-                # 引用情報
-                with st.expander("参考文献"):
-                    citations = st.session_state.paper_data.get('citations', [])
-                    if citations:
-                        for citation in citations:
-                            st.markdown(f"- [{citation.get('title', 'No Title')}]({citation.get('uri', '#')})")
-                    else:
-                        st.info("参考文献情報はありません。")
+                # 引用情報（取得元リンク）
+                citations = st.session_state.paper_data.get('citations', [])
+                if citations:
+                    st.markdown("##### 📚 取得元")
+                    for i, citation in enumerate(citations, 1):
+                        title = citation.get('title', 'No Title')
+                        uri = citation.get('uri', '#')
+                        if 'pubmed' in uri.lower():
+                            st.markdown(f"{i}. [{title}]({uri}) 🔗")
+                    st.caption("※ PubMedの論文ページで詳細を確認できます")
+                else:
+                    st.info("取得元情報が取得できませんでした。")
 
         with col2:
             st.markdown("#### 日本語訳")

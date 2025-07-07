@@ -1,9 +1,10 @@
 import streamlit as st
 import google.genai as genai
-from google.genai.types import GenerateContentConfig, Tool, GoogleSearch
+from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Schema
 from modules.utils import safe_api_call
 import re
 import random
+import json
 
 def validate_keywords(keywords):
     """
@@ -30,16 +31,18 @@ def validate_keywords(keywords):
 
 def find_medical_paper(keywords=None):
     """
-    与えられたキーワードでPubMedから医学論文のAbstractを検索・取得する。
-    キーワードがない場合は、典型的な分野からランダムに検索する。
+    与えられたキーワードでPubMedから医学論文情報を検索・取得する。
+    キーワードがない場合は、AIが国家試験範囲内で自動選択する。
     
     Args:
         keywords (str, optional): 検索キーワード. Defaults to None.
     
     Returns:
         dict: {
+            "title": str,
             "abstract": str,
             "citations": list,
+            "keywords_used": str,
             "error": str (optional)
         }
     """
@@ -48,42 +51,86 @@ def find_medical_paper(keywords=None):
         is_valid, error_msg = validate_keywords(keywords)
         if not is_valid:
             return {
+                "title": "",
                 "abstract": "",
                 "citations": [],
+                "keywords_used": "",
                 "error": error_msg
             }
+        keywords_used = keywords
     else:
-        # キーワードがない場合は、サンプルからランダムに選択
-        keywords = random.choice(get_sample_keywords())
+        # キーワードがない場合は、AIに国家試験範囲内で生成させる
+        keyword_result = generate_medical_keywords()
+        if 'error' in keyword_result:
+            return {
+                "title": "",
+                "abstract": "",
+                "citations": [],
+                "keywords_used": "",
+                "error": f"キーワード生成エラー: {keyword_result['error']}"
+            }
+        keywords_used = keyword_result['keywords']
     
     def _search_paper():
-        """内部の論文検索関数"""
+        """内部の論文検索関数（構造化出力使用）"""
         client = genai.Client()
         
-        tool = Tool(google_search=GoogleSearch())
-        config = GenerateContentConfig(tools=[tool])
+        # 構造化出力のスキーマ定義
+        paper_schema = Schema(
+            type="object",
+            properties={
+                "title": Schema(
+                    type="string",
+                    description="論文のタイトル（英語）"
+                ),
+                "abstract": Schema(
+                    type="string",
+                    description="論文のAbstract全文（英語）"
+                ),
+                "relevance_score": Schema(
+                    type="integer",
+                    description="検索キーワードとの関連度（1-10）",
+                    minimum=1,
+                    maximum=10
+                ),
+                "study_type": Schema(
+                    type="string",
+                    description="研究の種類（例: RCT, Meta-analysis, Cohort study等）"
+                )
+            },
+            required=["title", "abstract", "relevance_score", "study_type"]
+        )
         
-        # より具体的で効果的なプロンプト
-        prompt = f"""# 命令
-あなたは医学文献検索の専門家として、以下の条件に合致する最適な医学論文をPubMedから1つだけ見つけ、そのAbstract（要旨）のみを出力してください。
+        tool = Tool(google_search=GoogleSearch())
+        config = GenerateContentConfig(
+            tools=[tool],
+            response_schema=paper_schema
+        )
+        
+        # 構造化出力用のプロンプト
+        prompt = f"""# 任務
+医学文献検索の専門家として、キーワード「{keywords_used}」に関連する高品質な医学論文をPubMedから1つ選定し、JSON形式で情報を抽出してください。
 
 # 検索条件
-- キーワード: {keywords}
-- 対象: 査読済みのPubMed掲載論文
-- 論文の優先度:
-  1. 臨床的に極めて重要で、画期的な治療薬や診断法に関する研究（例: ARNi, SGLT2阻害薬, GLP-1受容体作動薬, 免疫チェックポイント阻害薬など）
-  2. 過去5年以内の最新研究
-  3. メタアナリシスまたはランダム化比較試験
-  4. 主要な医学雑誌に掲載された論文
+- 対象サイト: PubMed (site:pubmed.ncbi.nlm.nih.gov)
+- キーワード: {keywords_used}
+- 優先度:
+  1. 臨床的重要性が高い論文（例：ガイドラインに記載されるような治療法や診断法に関する論文（例：ARNi, SGLT2阻害薬, GLP-1受容体作動薬, 安定狭心症に対するPCIなど））
+  2. Impact factorが高い主要医学雑誌掲載論文
 
-# 出力ルール (!!最重要・厳守!!)
-- 論文の選定理由、思考プロセス、タイトル、著者名、ジャーナル名、発行日など、Abstract本文以外の情報は**一切含めないでください**。
-- 「以下にAbstractを示します。」のような前置きや、補足説明も**絶対に禁止**です。
-- 出力は、Abstractの英文の最初の単語から始まり、最後の単語（またはピリオド）で終わる必要があります。
-- Abstract本文のみを、完全な英語で出力してください。
+# 出力要件
+以下のJSON形式で正確に出力してください：
+- title: 論文の正確なタイトル（英語）
+- abstract: Abstract全文（英語、改行なし）
+- relevance_score: キーワードとの関連度（1-10の整数）
+- study_type: 研究デザインの種類
 
-# 実行開始
-site:pubmed.ncbi.nlm.nih.gov {keywords}"""
+# 品質基準
+- Abstractは100文字以上であること
+- タイトルとAbstractは実際の論文から正確に抽出すること
+- 医学的に信頼性の高い内容であること
+
+site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
 
         response = client.models.generate_content(
             model='gemini-2.5-flash',
@@ -94,14 +141,26 @@ site:pubmed.ncbi.nlm.nih.gov {keywords}"""
         if not response or not response.text:
             raise Exception("論文検索で有効な結果が得られませんでした。")
         
-        abstract_text = response.text.strip()
+        # 構造化出力の解析
+        try:
+            paper_data = json.loads(response.text)
+        except json.JSONDecodeError:
+            # フォールバック: テキストから抽出を試行
+            raise Exception("構造化出力の解析に失敗しました。")
         
-        # Abstract形式の検証
-        if len(abstract_text) < 100:
-            raise Exception("取得されたAbstractが短すぎます。より具体的なキーワードを試してください。")
+        # データ検証
+        required_fields = ["title", "abstract", "relevance_score", "study_type"]
+        for field in required_fields:
+            if field not in paper_data:
+                raise Exception(f"必須フィールド '{field}' が見つかりません。")
         
-        # 引用情報の抽出
+        if len(paper_data["abstract"]) < 100:
+            raise Exception("取得されたAbstractが短すぎます。")
+        
+        # 引用情報の抽出（改善版）
         citations = []
+        seen_urls = set()
+        
         if (response.candidates and
             len(response.candidates) > 0 and
             hasattr(response.candidates[0], 'grounding_metadata') and
@@ -111,19 +170,33 @@ site:pubmed.ncbi.nlm.nih.gov {keywords}"""
 
             for chunk in response.candidates[0].grounding_metadata.grounding_chunks:
                 if (hasattr(chunk, 'web') and chunk.web and
-                    hasattr(chunk.web, 'uri') and chunk.web.uri and
-                    hasattr(chunk.web, 'title') and chunk.web.title):
+                    hasattr(chunk.web, 'uri') and chunk.web.uri):
 
-                    # PubMedリンクのみを抽出
-                    if 'pubmed' in chunk.web.uri.lower():
+                    uri = chunk.web.uri
+                    title = chunk.web.title if hasattr(chunk.web, 'title') and chunk.web.title else uri
+                    
+                    # PubMedリンクまたはNCBIリンクを優先的に抽出
+                    if ('pubmed' in uri.lower() or 'ncbi.nlm.nih.gov' in uri.lower()) and uri not in seen_urls:
+                        seen_urls.add(uri)
+                        
+                        # タイトルをクリーンアップ
+                        if title == uri:
+                            pmid_match = re.search(r'/(\d+)/?$', uri)
+                            if pmid_match:
+                                title = f"PubMed ID: {pmid_match.group(1)}"
+                        
                         citations.append({
-                            "uri": chunk.web.uri,
-                            "title": chunk.web.title
+                            "uri": uri,
+                            "title": title
                         })
         
         return {
-            "abstract": abstract_text,
-            "citations": citations[:3]  # 最大3つまで
+            "title": paper_data["title"],
+            "abstract": paper_data["abstract"],
+            "study_type": paper_data["study_type"],
+            "relevance_score": paper_data["relevance_score"],
+            "citations": citations[:3],
+            "keywords_used": keywords_used
         }
     
     # 安全なAPI呼び出し
@@ -133,9 +206,108 @@ site:pubmed.ncbi.nlm.nih.gov {keywords}"""
         return result
     else:
         return {
+            "title": "",
             "abstract": "",
             "citations": [],
+            "keywords_used": keywords_used,
             "error": f"論文検索エラー: {result}"
+        }
+
+def generate_medical_keywords():
+    """
+    医師国家試験範囲内の医学キーワードをAIが自動生成する。
+    
+    Returns:
+        dict: {
+            "keywords": str,
+            "error": str (optional)
+        }
+    """
+    def _generate_keywords():
+        """内部のキーワード生成関数"""
+        client = genai.Client()
+        
+        # 構造化出力のスキーマ定義
+        keywords_schema = Schema(
+            type="object",
+            properties={
+                "keywords": Schema(
+                    type="string",
+                    description="医学論文検索用のキーワード（英語）"
+                ),
+                "category": Schema(
+                    type="string",
+                    description="医学分野のカテゴリ（例: 循環器学、消化器学等）"
+                ),
+                "rationale": Schema(
+                    type="string",
+                    description="このキーワードを選択した理由"
+                )
+            },
+            required=["keywords", "category", "rationale"]
+        )
+        
+        config = GenerateContentConfig(response_schema=keywords_schema)
+        
+        prompt = """# 任務
+医師国家試験の出題範囲内で、臨床的に重要かつ最新の医学論文が見つかりやすいキーワードを1つ生成してください。
+
+# 選択基準
+1. 医師国家試験の出題範囲内であること
+2. 臨床現場で頻繁に遭遇する疾患・治療法であること
+3. 近年の医学的進歩が著しい分野であること
+4. PubMedで高品質な論文が見つかりやすいこと
+
+# 対象分野（例）
+- 循環器学: 心不全、冠動脈疾患、不整脈
+- 内分泌代謝学: 糖尿病、甲状腺疾患
+- 消化器学: 炎症性腸疾患、肝疾患
+- 神経学: 脳卒中、認知症、パーキンソン病
+- 腫瘍学: がん免疫療法、分子標的治療
+- 感染症学: 抗菌薬耐性、ワクチン、感染症動向、感染症の予防
+- 救急医学: 敗血症、心肺蘇生
+- 精神医学: うつ病、統合失調症
+
+# 出力要件
+JSON形式で以下を出力：
+- keywords: 検索キーワード（英語、2-4語程度）
+- category: 医学分野のカテゴリ
+- rationale: 選択理由（簡潔に）
+
+重要度が高く、論文が豊富で、国家試験でも重要な分野から選択してください。"""
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=config,
+        )
+        
+        if not response or not response.text:
+            raise Exception("キーワード生成で有効な結果が得られませんでした。")
+        
+        try:
+            keyword_data = json.loads(response.text)
+        except json.JSONDecodeError:
+            raise Exception("構造化出力の解析に失敗しました。")
+        
+        if "keywords" not in keyword_data:
+            raise Exception("キーワードが生成されませんでした。")
+        
+        return {
+            "keywords": keyword_data["keywords"],
+            "category": keyword_data.get("category", ""),
+            "rationale": keyword_data.get("rationale", "")
+        }
+    
+    # 安全なAPI呼び出し
+    success, result = safe_api_call(_generate_keywords)
+    
+    if success:
+        return result
+    else:
+        return {
+            "keywords": "",
+            "error": f"キーワード生成エラー: {result}"
         }
 
 def generate_essay_theme():
