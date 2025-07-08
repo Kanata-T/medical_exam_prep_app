@@ -896,6 +896,191 @@ def get_available_fields():
     
     return available_fields if available_fields else MEDICAL_FIELDS.copy()
 
+# 過去問データ（県総採用試験 英語読解）
+PAST_EXAM_PATTERNS = [
+    {
+        "id": "exam_2024_syphilis",
+        "year": 2024,
+        "type": "letter_translation_opinion",
+        "topic": "梅毒治療薬耐性",
+        "content": """In 2024, the Centers for Disease Control and Prevention (CDC) estimated that syphilis cases had risen by 79% between 2018 and 2022. CDC and Canadian guidelines for syphilis treatment recommend penicillin G, administered parenterally, for all stages of syphilis. A single 2-g oral dose of azithromycin was listed as an alternative regimen for those with penicillin allergy starting in 2002, until mutations conferring macrolide resistance were found in 53% of Treponema pallidum (T. pallidum) strains across the United States from 2007 through 2009; current CDC and Canadian guidelines state that azithromycin should not be used for syphilis. Given the global resurgence in syphilis and recurring shortages of the mainstay of treatment of uncomplicated syphilis, benzathine penicillin G, estimation of the current prevalence of azithromycin resistance provides context when strategies for syphilis treatment are being considered (alternative antibiotic choices are discussed in Part A in the Supplementary Appendix, available with the full text of this letter at NEJM.org). Here we report that 599 of 604 T. pallidum strains (99.2%) that were sampled in North America from 2017 through 2023 were genotypically resistant to azithromycin (Fig. 1A). Samples were collected from patients in 13 U.S. states, Washington, D.C., and two Canadian provinces (Table S1 in the Supplementary Appendix; also see the Supplementary Methods). The median age of the patients was 33 years (range, 0 to 76). A total of 466 of 588 patients (79.3%) were male. Among male patients with sex-partner information available, 73 of 88 (83%) were men who have sex with men. The syphilis stage was documented for 115 patients, with secondary syphilis being the most prevalent (56 of 115 [48.7%]). Among strains with a near-complete genome obtained, 23 of 54 (43%) belonged to the Nichols-like lineage and 31 of 54 (57%) to the SS14-like lineage (Fig. 1B). Of the 599 azithromycin-resistant strains, 584 (97.5%) were resistant through the A2058G mutation in the gene encoding the 23S ribosomal RNA subunit and 15 (2.5%) through the A2059G mutation. The resistance phenotype conferred by these mutations persists in the presence of doses of up to 64 times the minimum inhibitory concentration of azithromycin for T. pallidum (Part B in the Supplementary Appendix). Although resistance to azithromycin among women, as well as men who have sex with women, was present in only 8 of 57 specimens (14%) obtained from 2007 through 2009, resistance increased in these populations to 99.3% (136 of 137 specimens) from 2017 through 2023.""",
+        "task1": "以下のletterを日本語訳しなさい (A4を1枚)",
+        "task2": "このletterを読んで、あなたの意見を述べなさい (A4を1枚)"
+    },
+    {
+        "id": "exam_2024_orthopedic",
+        "year": 2024,
+        "type": "letter_translation_opinion",
+        "topic": "整形外科外傷血栓予防",
+        "content": """Aspirin for thromboprophylaxis to prevent venous thromboembolism after hip- or knee-replacement surgery has been included in clinical guidelines. Although the use of aspirin thromboprophylaxis for venous thromboembolism in hip and knee replacements is still in debate, data on its use in patients with extremity fracture (in the hip to midfoot or shoulder to wrist) are limited.1 In the Prevention of Clot in Orthopaedic Trauma (PREVENT CLOT) trial, the Major Extremity Trauma Research Consortium (METRC) investigators (Jan. 19 issue)2 tested the noninferiority of aspirin as compared with low-molecular-weight heparin for thromboprophylaxis in patients after an extremity fracture treated with surgery or after a hip or acetabular fracture. The trial included patients with different levels of risk of venous thromboembolism as assessed according to the well-established Caprini score,3 as well as patients with upper extremity fracture, for whom the 2012 guidelines from the American College of Chest Physicians4 suggest that no prophylaxis is needed. In addition, patients in this trial were at low risk for venous thromboembolism, given their young age (mean [±SD], 44.6±17.8 years) — a factor that probably excludes most high-risk patients with hip fracture, who are typically older than 70 years of age. The authors' conclusion that aspirin in general was noninferior to low-molecular-weight heparin after an extremity fracture should be interpreted with caution because the enrollment of low-risk patients arouses concerns regarding selection bias.""",
+        "task1": "以下のletterを日本語訳しなさい(A4を1枚)",
+        "task2": "このletterを読んで、あなたの意見を述べなさい(A4を1枚)"
+    },
+    {
+        "id": "exam_2016_skin_abscess",
+        "year": 2016,
+        "type": "paper_comment_translation_opinion",
+        "topic": "皮膚膿瘍抗菌薬治療",
+        "content": {
+            "paper_summary": """2016年3月に皮膚膿瘍に関して以下のような論文が出ました。
+皮膚膿瘍による救急受診が、メチシリン耐性黄色ブドウ球菌（MRSA）の出現に伴い増加しており、救急部において、単純性膿瘍に対し切開排膿を受ける外来患者を対象に、トリメトプリム・スルファメトキサゾールがプラセボに対して優越性が認められるかどうかを検討し、主要転帰は膿瘍の臨床的治癒とし、7～14日の時点で評価した。皮膚膿瘍の切開排膿を受けた患者にトリメトプリム・スルファメトキサゾールを投与することで、プラセボと比較して高い治癒率が得られた。""",
+            "comment": """The study by Talan et al. supports the use of antibiotics as an adjunctive treatment for uncomplicated skin abscesses, but this recommendation runs contrary to current efforts to reduce antibiotic use in the face of the rising threat of antimicrobial resistance. We note that up to a quarter of the swabs processed in the study showed either no growth or coagulase-negative staphylococcal growth. Did the authors find a difference in response rate stratified according to these culture results? In addition, since high adherence to antibiotic therapy was achieved in only 64.7% of study participants, was a subanalysis performed for those who received courses that were shorter than prescribed? When antibiotics are used as an adjunct to drainage, the majority of bacteria are probably removed during surgery, and recent studies have shown that adequate source control can shorten the standard course of antibiotics without reducing clinical efficacy. Therefore, it is likely that when antibiotics are used as an adjunctive treatment, a shorter course would provide equivalent clinical benefit and would also reduce the risks of adverse effects, limit total antibiotic consumption, and decrease the selective pressure toward the development of resistance."""
+        },
+        "task1": "（１）和訳して、（２）そのコメントについて、皆さんの意見を書きなさい。"
+    }
+]
+
+def format_paper_as_exam(paper_data, format_type="letter_translation_opinion"):
+    """
+    論文データを過去問スタイルに変換します。
+    
+    Args:
+        paper_data (dict): 論文データ（find_medical_paperの結果）
+        format_type (str): 出題形式 ("letter_translation_opinion" or "paper_comment_translation_opinion")
+    
+    Returns:
+        dict: {
+            "formatted_content": str,
+            "task1": str,
+            "task2": str,
+            "error": str (optional)
+        }
+    """
+    if 'error' in paper_data:
+        return {
+            "formatted_content": "",
+            "task1": "",
+            "task2": "",
+            "error": paper_data['error']
+        }
+    
+    def _format_as_exam():
+        """内部の変換処理関数"""
+        client = genai.Client()
+        
+        # 過去問データを参考例として含める
+        past_examples = ""
+        for i, exam in enumerate(PAST_EXAM_PATTERNS[:2], 1):  # 最初の2つの例を使用
+            past_examples += f"\n【過去問例{i}】\n"
+            past_examples += f"内容: {exam['content'][:200]}...\n"
+            past_examples += f"課題1: {exam['task1']}\n"
+            past_examples += f"課題2: {exam['task2']}\n"
+        
+        if format_type == "letter_translation_opinion":
+            prompt = f"""# 任務
+医師採用試験の英語読解問題作成の専門家として、提供された論文のAbstractを過去問と同様の形式に変換してください。
+
+# 過去問の出題形式
+{past_examples}
+
+# 変換対象の論文情報
+- タイトル: {paper_data.get('title', '')}
+- 研究種別: {paper_data.get('study_type', '')}
+- Abstract: {paper_data.get('abstract', '')}
+
+# 変換指示
+1. AbstractをLetterとして位置づけ、過去問と同じ出題形式に変換してください
+2. 医学専門用語や統計データはそのまま保持してください
+3. 論文の科学的内容を改変せず、正確に引用してください
+
+# 出力形式（必須）
+以下のJSON形式で正確に出力してください：
+
+{{
+  "formatted_content": "論文のAbstract全文（改変なし）",
+  "task1": "以下のletterを日本語訳しなさい (A4を1枚)",
+  "task2": "このletterを読んで、あなたの意見を述べなさい (A4を1枚)"
+}}
+
+# 重要な指示
+- formatted_contentには論文のAbstractをそのまま含めてください
+- 課題文は過去問と同じ形式で記述してください
+- 論文の内容を要約や改変せず、完全な形で含めてください"""
+
+        else:  # paper_comment_translation_opinion
+            prompt = f"""# 任務
+医師採用試験の英語読解問題作成の専門家として、提供された論文について仮想的なコメント（英語）を生成し、過去問と同様の形式に変換してください。
+
+# 過去問例（皮膚膿瘍の例）
+論文概要が日本語で提示され、その後に英語のコメントが続き、
+課題: （１）和訳して、（２）そのコメントについて、皆さんの意見を書きなさい。
+
+# 変換対象の論文情報  
+- タイトル: {paper_data.get('title', '')}
+- 研究種別: {paper_data.get('study_type', '')}
+- Abstract: {paper_data.get('abstract', '')}
+
+# 変換指示
+1. Abstractを簡潔な日本語概要に要約してください
+2. その論文に対する批判的なコメント（英語、医学専門家の視点）を生成してください
+3. コメントは建設的で学術的な内容とし、論文の方法論、結果解釈、臨床応用などに言及してください
+
+# 出力形式（必須）
+以下のJSON形式で正確に出力してください：
+
+{{
+  "formatted_content": {{
+    "paper_summary": "論文の簡潔な日本語要約（200-300文字）",
+    "comment": "論文に対する批判的コメント（英語、200-400語）"
+  }},
+  "task1": "（１）和訳して、（２）そのコメントについて、皆さんの意見を書きなさい。",
+  "task2": ""
+}}"""
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        if not response or not response.text:
+            raise Exception("論文変換で有効な結果が得られませんでした。")
+        
+        # JSONの解析
+        response_text = response.text.strip()
+        
+        # JSONブロックを抽出
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            response_text = json_match.group(1)
+        
+        # 先頭と末尾の不要なテキストを除去
+        start_brace = response_text.find('{')
+        end_brace = response_text.rfind('}') + 1
+        if start_brace != -1 and end_brace > start_brace:
+            response_text = response_text[start_brace:end_brace]
+        else:
+            raise Exception("有効なJSON構造が見つかりませんでした。")
+        
+        formatted_data = json.loads(response_text)
+        
+        # データ検証
+        if "formatted_content" not in formatted_data:
+            raise Exception("formatted_contentフィールドが見つかりません。")
+        
+        return formatted_data
+    
+    # 安全なAPI呼び出し
+    success, result = safe_api_call(_format_as_exam)
+    
+    if success:
+        return result
+    else:
+        return {
+            "formatted_content": "",
+            "task1": "",
+            "task2": "",
+            "error": f"論文変換エラー: {result}"
+        }
+
+def get_past_exam_patterns():
+    """
+    過去問パターンのリストを返します。
+    
+    Returns:
+        list: 過去問パターンのリスト
+    """
+    return PAST_EXAM_PATTERNS.copy()
+
 def get_sample_keywords():
     """
     サンプルキーワードのリストを返します。

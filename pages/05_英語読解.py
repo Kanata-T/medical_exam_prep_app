@@ -2,8 +2,9 @@ import streamlit as st
 import time
 from datetime import datetime, timedelta
 from modules.paper_finder import (find_medical_paper, get_sample_keywords,
-                                get_keyword_history, clear_keyword_history, get_available_fields)
-from modules.scorer import score_reading_stream, get_reading_score_distribution
+                                get_keyword_history, clear_keyword_history, get_available_fields,
+                                format_paper_as_exam, get_past_exam_patterns)
+from modules.scorer import score_reading_stream, get_reading_score_distribution, score_exam_style_stream
 from modules.utils import (handle_submission, reset_session_state, 
                           check_api_configuration, show_api_setup_guide,
                           extract_scores, save_history, format_history_for_download,
@@ -102,6 +103,9 @@ session_vars = {
     'reading_completed': False,
     'reading_results': None,
     'reading_step': 'setup',  # setup, reading, scoring, completed
+    'exam_style_enabled': False,  # 過去問スタイル出題の有効化
+    'exam_format_type': 'letter_translation_opinion',  # 出題形式
+    'exam_formatted_data': None,  # 過去問スタイルに変換されたデータ
 }
 
 # セッション復元を試行
@@ -262,15 +266,88 @@ if st.session_state.reading_step == 'setup':
         help="医学論文のPubMed検索に使用するキーワードを英語で入力してください。空白の場合、AIが医師国家試験範囲内から臨床的に重要なキーワードを自動選択します。"
     )
     
+    # 過去問スタイル出題設定
+    st.markdown("---")
+    st.markdown("### 🎯 出題形式設定")
+    
+    # 過去問スタイル有効化チェックボックス
+    exam_style_enabled = st.checkbox(
+        "過去問スタイルで出題する",
+        value=st.session_state.get('exam_style_enabled', False),
+        help="論文を県総採用試験の過去問と同様の形式に変換して出題します"
+    )
+    st.session_state.exam_style_enabled = exam_style_enabled
+    
+    if exam_style_enabled:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # 出題形式選択
+            format_options = {
+                "letter_translation_opinion": "Letter形式（翻訳 + 意見）",
+                "paper_comment_translation_opinion": "論文コメント形式（コメント翻訳 + 意見）"
+            }
+            
+            selected_format = st.selectbox(
+                "出題形式を選択",
+                options=list(format_options.keys()),
+                format_func=lambda x: format_options[x],
+                index=0 if st.session_state.get('exam_format_type', 'letter_translation_opinion') == 'letter_translation_opinion' else 1,
+                help="過去問の出題形式を選択してください"
+            )
+            st.session_state.exam_format_type = selected_format
+        
+        with col2:
+            # 過去問例の表示
+            with st.expander("📝 過去問例を見る", expanded=False):
+                past_patterns = get_past_exam_patterns()
+                for i, pattern in enumerate(past_patterns[:2], 1):  # 最初の2つを表示
+                    st.markdown(f"**過去問例{i}**: {pattern['topic']}")
+                    if pattern['type'] == 'letter_translation_opinion':
+                        st.caption(f"形式: {pattern['task1']} / {pattern['task2']}")
+                        st.code(pattern['content'][:200] + "...", language=None)
+                    else:
+                        st.caption(f"形式: {pattern['task1']}")
+                        if isinstance(pattern['content'], dict):
+                            st.text(pattern['content']['paper_summary'][:100] + "...")
+                            st.code(pattern['content']['comment'][:200] + "...", language=None)
+                    st.markdown("---")
+        
+        # 過去問スタイル説明
+        st.info(f"""
+        **選択中の形式**: {format_options[selected_format]}
+        
+        📋 **この形式での出題内容**:
+        {"- 論文のAbstractを翻訳する課題" if selected_format == 'letter_translation_opinion' else "- 論文に対するコメントを翻訳する課題"}
+        {"- 論文の内容について意見を述べる課題" if selected_format == 'letter_translation_opinion' else "- コメントについて意見を述べる課題"}
+        
+        ⚠️ **注意**: 過去問スタイルを有効にすると、AIが論文を県総採用試験の形式に変換します（変換時間: 追加で約30秒）
+        """)
+    else:
+        st.info("""
+        **標準形式**: 論文のAbstractを直接翻訳・考察する形式で出題されます
+        """)
+    
+    st.markdown("---")
+    
     # 読解練習開始ボタン
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.button("読解練習開始", type="primary", use_container_width=True):
             loading_message = "論文を準備中..."
+            estimated_time = 30
+            
             if not keywords.strip():
-                loading_message += "（AIがキーワードを自動選択中...約45秒）"
+                estimated_time += 45  # AI自動選択時間
+                loading_message += "（AIがキーワードを自動選択中"
             else:
-                loading_message += "（約30秒）"
+                loading_message += "（論文検索中"
+            
+            if exam_style_enabled:
+                estimated_time += 30  # 過去問変換時間
+                loading_message += " + 過去問スタイル変換"
+            
+            loading_message += f"...約{estimated_time}秒）"
                 
             with st.spinner(loading_message):
                 # 論文検索
@@ -278,6 +355,20 @@ if st.session_state.reading_step == 'setup':
                 if 'error' in paper_result:
                     st.error(f"論文検索エラー: {paper_result['error']}")
                     st.stop()
+                
+                # 過去問スタイル変換（有効な場合）
+                if exam_style_enabled:
+                    st.info("論文を過去問スタイルに変換中...")
+                    exam_result = format_paper_as_exam(paper_result, st.session_state.exam_format_type)
+                    if 'error' in exam_result:
+                        st.error(f"過去問変換エラー: {exam_result['error']}")
+                        st.warning("標準形式で継続します。")
+                        st.session_state.exam_formatted_data = None
+                    else:
+                        st.session_state.exam_formatted_data = exam_result
+                        st.success("過去問スタイルへの変換が完了しました！")
+                else:
+                    st.session_state.exam_formatted_data = None
                 
                 # セッション状態更新
                 st.session_state.paper_data = paper_result
@@ -291,6 +382,12 @@ if st.session_state.reading_step == 'setup':
                 if selected_category:
                     success_msg += f"\n**選択された分野**: {selected_category}"
                 success_msg += f"\n**キーワード**: `{selected_keywords}`"
+            
+            if exam_style_enabled and st.session_state.exam_formatted_data:
+                success_msg += f"\n**出題形式**: 過去問スタイル（{format_options[st.session_state.exam_format_type]}）"
+            else:
+                success_msg += f"\n**出題形式**: 標準形式"
+            
             st.success(success_msg)
             time.sleep(1)
             st.rerun()
@@ -307,122 +404,248 @@ if st.session_state.reading_step == 'setup':
 
 # 読解練習フェーズ
 elif st.session_state.reading_step == 'reading':
-    # 課題1: Abstract読解と翻訳
-    st.markdown('<div class="task-card">', unsafe_allow_html=True)
-    st.markdown("### 課題1: Abstract読解・翻訳")
+    # 過去問スタイル vs 標準形式の判定
+    is_exam_style = st.session_state.get('exam_style_enabled', False) and st.session_state.get('exam_formatted_data')
+    exam_data = st.session_state.get('exam_formatted_data', {})
+    format_type = st.session_state.get('exam_format_type', 'letter_translation_opinion')
     
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("#### 📄 論文情報")
-        if st.session_state.paper_data and 'abstract' in st.session_state.paper_data:
-            # 論文タイトル
-            paper_title = st.session_state.paper_data.get('title', '(タイトル不明)')
-            st.markdown("##### 📋 タイトル")
-            st.markdown(f"**{paper_title}**")
+    # 出題形式の表示
+    if is_exam_style:
+        format_names = {
+            "letter_translation_opinion": "Letter形式（翻訳 + 意見）",
+            "paper_comment_translation_opinion": "論文コメント形式（コメント翻訳 + 意見）"
+        }
+        st.info(f"🎯 **過去問スタイル出題**: {format_names.get(format_type, '不明')}")
+    
+    # 課題1: 翻訳
+    st.markdown('<div class="task-card">', unsafe_allow_html=True)
+    
+    if is_exam_style:
+        # 過去問スタイルの表示
+        if format_type == "letter_translation_opinion":
+            st.markdown("### 課題1: Letter翻訳")
+            task1_instruction = exam_data.get('task1', '以下のletterを日本語訳しなさい (A4を1枚)')
+        else:  # paper_comment_translation_opinion
+            st.markdown("### 課題1: コメント翻訳・意見")
+            task1_instruction = exam_data.get('task1', '（１）和訳して、（２）そのコメントについて、皆さんの意見を書きなさい。')
+        
+        st.markdown(f"**課題**: {task1_instruction}")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 📄 出題内容")
             
-            # 研究種別とキーワード情報
-            col_info1, col_info2 = st.columns(2)
-            with col_info1:
-                study_type = st.session_state.paper_data.get('study_type', '不明')
-                st.markdown(f"**研究種別:** {study_type}")
-            with col_info2:
-                relevance = st.session_state.paper_data.get('relevance_score', 'N/A')
-                st.markdown(f"**関連度:** {relevance}/10")
-            
-            keywords_used = st.session_state.paper_data.get('keywords_used', '')
-            if keywords_used:
-                st.markdown(f"**検索キーワード:** `{keywords_used}`")
-            
-            st.markdown("---")
-            
-            # Abstract
-            st.markdown("##### 📖 Abstract")
-            abstract_text = st.session_state.paper_data['abstract']
-            st.markdown(f'<div class="abstract-container">{abstract_text}</div>', unsafe_allow_html=True)
-            
-            # 引用情報（取得元リンク）
-            citations = st.session_state.paper_data.get('citations', [])
-            if citations:
-                st.markdown("##### 📚 取得元")
-                for i, citation in enumerate(citations, 1):
-                    title = citation.get('title', 'No Title')
-                    uri = citation.get('uri', '#')
-                    if 'pubmed' in uri.lower():
-                        st.markdown(f"{i}. [{title}]({uri}) 🔗")
-                st.caption("※ PubMedの論文ページで詳細を確認できます")
+            if format_type == "letter_translation_opinion":
+                # Letter形式: Abstractをそのまま表示
+                content_text = exam_data.get('formatted_content', '')
+                st.markdown(f'<div class="abstract-container">{content_text}</div>', unsafe_allow_html=True)
             else:
-                st.info("取得元情報が取得できませんでした。")
+                # コメント形式: 論文概要 + コメント
+                content = exam_data.get('formatted_content', {})
+                if isinstance(content, dict):
+                    paper_summary = content.get('paper_summary', '')
+                    comment_text = content.get('comment', '')
+                    
+                    st.markdown("##### 📋 論文概要")
+                    st.markdown(paper_summary)
+                    st.markdown("##### 💬 コメント")
+                    st.markdown(f'<div class="abstract-container">{comment_text}</div>', unsafe_allow_html=True)
+                else:
+                    st.error("コメント形式のデータが正しく取得できませんでした。")
+            
+            # 論文の基本情報（参考として表示）
+            with st.expander("📚 元論文情報（参考）", expanded=False):
+                paper_title = st.session_state.paper_data.get('title', '(タイトル不明)')
+                st.markdown(f"**タイトル**: {paper_title}")
+                study_type = st.session_state.paper_data.get('study_type', '不明')
+                st.markdown(f"**研究種別**: {study_type}")
+                keywords_used = st.session_state.paper_data.get('keywords_used', '')
+                if keywords_used:
+                    st.markdown(f"**検索キーワード**: `{keywords_used}`")
+        
+        with col2:
+            if format_type == "letter_translation_opinion":
+                # Letter形式: 翻訳のみ
+                st.markdown("#### 日本語訳")
+                translation = st.text_area(
+                    "上記のletterを正確で自然な日本語に翻訳してください。",
+                    height=800,
+                    key="translation",
+                    label_visibility="collapsed",
+                    help="専門用語を正確に訳し、自然で読みやすい日本語にしてください"
+                )
+                st.caption(f"入力文字数: {len(translation)}文字")
+            else:
+                # コメント形式: 翻訳 + 意見を同じエリアで
+                st.markdown("#### 回答（翻訳 + 意見）")
+                translation = st.text_area(
+                    "（１）コメントを和訳し、（２）そのコメントについてあなたの意見を述べてください。",
+                    height=800,
+                    key="translation",
+                    label_visibility="collapsed",
+                    help="コメントの翻訳と意見を分けて記述してください"
+                )
+                st.caption(f"入力文字数: {len(translation)}文字")
+    
+    else:
+        # 標準形式の表示
+        st.markdown("### 課題1: Abstract読解・翻訳")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 📄 論文情報")
+            if st.session_state.paper_data and 'abstract' in st.session_state.paper_data:
+                # 論文タイトル
+                paper_title = st.session_state.paper_data.get('title', '(タイトル不明)')
+                st.markdown("##### 📋 タイトル")
+                st.markdown(f"**{paper_title}**")
+                
+                # 研究種別とキーワード情報
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    study_type = st.session_state.paper_data.get('study_type', '不明')
+                    st.markdown(f"**研究種別:** {study_type}")
+                with col_info2:
+                    relevance = st.session_state.paper_data.get('relevance_score', 'N/A')
+                    st.markdown(f"**関連度:** {relevance}/10")
+                
+                keywords_used = st.session_state.paper_data.get('keywords_used', '')
+                if keywords_used:
+                    st.markdown(f"**検索キーワード:** `{keywords_used}`")
+                
+                st.markdown("---")
+                
+                # Abstract
+                st.markdown("##### 📖 Abstract")
+                abstract_text = st.session_state.paper_data['abstract']
+                st.markdown(f'<div class="abstract-container">{abstract_text}</div>', unsafe_allow_html=True)
+                
+                # 引用情報（取得元リンク）
+                citations = st.session_state.paper_data.get('citations', [])
+                if citations:
+                    st.markdown("##### 📚 取得元")
+                    for i, citation in enumerate(citations, 1):
+                        title = citation.get('title', 'No Title')
+                        uri = citation.get('uri', '#')
+                        if 'pubmed' in uri.lower():
+                            st.markdown(f"{i}. [{title}]({uri}) 🔗")
+                    st.caption("※ PubMedの論文ページで詳細を確認できます")
+                else:
+                    st.info("取得元情報が取得できませんでした。")
 
-    with col2:
-        st.markdown("#### 日本語訳")
-        translation = st.text_area(
-            "上記のAbstractを正確で自然な日本語に翻訳してください。",
-            height=800,
-            key="translation",
-            label_visibility="collapsed",
-            help="専門用語を正確に訳し、自然で読みやすい日本語にしてください"
-        )
-        st.caption(f"入力文字数: {len(translation)}文字")
+        with col2:
+            st.markdown("#### 日本語訳")
+            translation = st.text_area(
+                "上記のAbstractを正確で自然な日本語に翻訳してください。",
+                height=800,
+                key="translation",
+                label_visibility="collapsed",
+                help="専門用語を正確に訳し、自然で読みやすい日本語にしてください"
+            )
+            st.caption(f"入力文字数: {len(translation)}文字")
     
     st.markdown("</div>", unsafe_allow_html=True) # task-card end
 
-    # 課題2: 意見・考察
-    st.markdown('<div class="task-card">', unsafe_allow_html=True)
-    st.markdown("### 課題2: Abstractについての意見・考察")
-    opinion = st.text_area(
-        "このAbstractの内容について、あなたの意見や考察を述べてください。",
-        height=600,
-        key="opinion",
-        label_visibility="collapsed",
-        help="論文の内容を理解した上で、独自の視点や洞察を含めた意見を記述してください"
-    )
-    
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.caption(f"入力文字数: {len(opinion)}文字")
-        if opinion and len(opinion) >= 50:
-            target_ratio = len(opinion) / 300  # 300文字を目安とした進捗
-            st.progress(min(target_ratio, 1.0))
-    with col2:
-        if opinion and len(opinion) >= 200:
-            st.success("充分")
-        elif opinion and len(opinion) >= 100:
-            st.warning("やや少ない")
-        elif opinion and len(opinion) >= 50:
-            st.info("最低限")
+    # 課題2: 意見・考察（Letter形式または標準形式の場合のみ）
+    if not is_exam_style or format_type == "letter_translation_opinion":
+        st.markdown('<div class="task-card">', unsafe_allow_html=True)
+        if is_exam_style:
+            st.markdown("### 課題2: Letterについての意見")
+            task2_instruction = exam_data.get('task2', 'このletterを読んで、あなたの意見を述べなさい (A4を1枚)')
+            st.markdown(f"**課題**: {task2_instruction}")
+            opinion_prompt = "このletterの内容について、あなたの意見や考察を述べてください。"
         else:
-            st.error("不足")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("### 課題2: Abstractについての意見・考察")
+            opinion_prompt = "このAbstractの内容について、あなたの意見や考察を述べてください。"
+        
+        opinion = st.text_area(
+            opinion_prompt,
+            height=600,
+            key="opinion",
+            label_visibility="collapsed",
+            help="論文の内容を理解した上で、独自の視点や洞察を含めた意見を記述してください"
+        )
+    else:
+        # コメント形式の場合は意見も課題1に含まれるため、課題2は設定しない
+        opinion = ""  # 空の意見として扱う
+        
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.caption(f"入力文字数: {len(opinion)}文字")
+            if opinion and len(opinion) >= 50:
+                target_ratio = len(opinion) / 300  # 300文字を目安とした進捗
+                st.progress(min(target_ratio, 1.0))
+        with col2:
+            if opinion and len(opinion) >= 200:
+                st.success("充分")
+            elif opinion and len(opinion) >= 100:
+                st.warning("やや少ない")
+            elif opinion and len(opinion) >= 50:
+                st.info("最低限")
+            else:
+                st.error("不足")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # 提出ボタン
     col1, col2 = st.columns([3, 1])
     with col1:
-        # 入力チェック
-        can_submit = (
-            translation and len(translation.strip()) >= 30 and
-            opinion and len(opinion.strip()) >= 50
-        )
+        # 入力チェック（過去問形式に対応）
+        if is_exam_style and format_type == "paper_comment_translation_opinion":
+            # コメント形式: 翻訳のみで判定（意見も同じテキストエリアに含まれる）
+            can_submit = translation and len(translation.strip()) >= 100
+            submit_help = "コメントの翻訳と意見を合わせて100文字以上入力してください。"
+        else:
+            # Letter形式または標準形式: 翻訳 + 意見の両方が必要
+            can_submit = (
+                translation and len(translation.strip()) >= 30 and
+                opinion and len(opinion.strip()) >= 50
+            )
+            submit_help = "翻訳（30文字以上）と意見（50文字以上）の両方を入力してください。"
         
         if st.button("提出して採点する", type="primary", use_container_width=True, disabled=not can_submit):
             if not can_submit:
-                st.error("すべての項目に適切な分量を入力してください。")
+                st.error(f"入力が不足しています。{submit_help}")
             else:
                 # 採点フェーズへ移行
                 st.session_state.reading_step = 'scoring'
-                st.session_state.submitted_reading_data = {
-                    'translation': translation,
-                    'opinion': opinion,
-                    'keywords': st.session_state.get('reading_keywords', ''),
-                    'abstract': st.session_state.paper_data['abstract'],
-                    'citations': st.session_state.paper_data.get('citations', [])
-                }
+                
+                # 提出データの準備（過去問スタイルに対応）
+                if is_exam_style:
+                    submitted_data = {
+                        'translation': translation,
+                        'opinion': opinion if format_type == "letter_translation_opinion" else "",
+                        'keywords': st.session_state.get('reading_keywords', ''),
+                        'exam_style': True,
+                        'format_type': format_type,
+                        'exam_data': exam_data,
+                        'original_abstract': st.session_state.paper_data['abstract'],
+                        'citations': st.session_state.paper_data.get('citations', [])
+                    }
+                    
+                    # コメント形式の場合、translationに翻訳と意見の両方が含まれる
+                    if format_type == "paper_comment_translation_opinion":
+                        submitted_data['comment_response'] = translation  # 翻訳と意見の統合回答
+                else:
+                    submitted_data = {
+                        'translation': translation,
+                        'opinion': opinion,
+                        'keywords': st.session_state.get('reading_keywords', ''),
+                        'exam_style': False,
+                        'abstract': st.session_state.paper_data['abstract'],
+                        'citations': st.session_state.paper_data.get('citations', [])
+                    }
+                
+                st.session_state.submitted_reading_data = submitted_data
                 st.rerun()
     
     with col2:
         if not can_submit:
-            st.warning("入力不足の項目があります")
+            st.warning("入力不足")
+            if is_exam_style and format_type == "paper_comment_translation_opinion":
+                st.caption("翻訳+意見で100文字以上")
+            else:
+                st.caption("翻訳30文字+ & 意見50文字+")
         else:
             st.success("提出準備完了")
 
@@ -435,13 +658,41 @@ elif st.session_state.reading_step == 'scoring':
     </div>
     """, unsafe_allow_html=True)
     
-    # 採点実行
+    # 採点実行（過去問スタイルに対応）
     submitted = st.session_state.submitted_reading_data
-    stream = score_reading_stream(
-        submitted['abstract'],
-        submitted['translation'],
-        submitted['opinion']
-    )
+    
+    if submitted.get('exam_style', False):
+        # 過去問スタイルの採点
+        exam_data = submitted.get('exam_data', {})
+        format_type = submitted.get('format_type', 'letter_translation_opinion')
+        
+        if format_type == "letter_translation_opinion":
+            content = exam_data.get('formatted_content', '')
+            task_instruction = f"{exam_data.get('task1', '')} / {exam_data.get('task2', '')}"
+            stream = score_exam_style_stream(
+                content,
+                submitted['translation'],
+                submitted['opinion'],
+                format_type,
+                task_instruction
+            )
+        else:  # paper_comment_translation_opinion
+            content = exam_data.get('formatted_content', {})
+            task_instruction = exam_data.get('task1', '')
+            stream = score_exam_style_stream(
+                content,
+                submitted.get('comment_response', submitted['translation']),
+                "",  # 意見はcomment_responseに含まれている
+                format_type,
+                task_instruction
+            )
+    else:
+        # 標準形式の採点
+        stream = score_reading_stream(
+            submitted['abstract'],
+            submitted['translation'],
+            submitted['opinion']
+        )
     
     # 採点結果表示
     st.markdown("### 採点結果")
@@ -471,10 +722,22 @@ elif st.session_state.reading_step == 'scoring':
         progress_bar.progress(1.0)
         status_text.text("採点完了")
         
-        # 履歴保存
+        # 履歴保存（過去問スタイル対応）
         scores = extract_scores(full_feedback)
+        
+        if submitted.get('exam_style', False):
+            exam_type = "過去問スタイル英語読解"
+            format_names = {
+                "letter_translation_opinion": "Letter形式（翻訳 + 意見）",
+                "paper_comment_translation_opinion": "論文コメント形式（コメント翻訳 + 意見）"
+            }
+            format_name = format_names.get(submitted.get('format_type', ''), '不明')
+            exam_type += f" - {format_name}"
+        else:
+            exam_type = "英語読解"
+        
         history_data = {
-            "type": "英語読解",
+            "type": exam_type,
             "date": datetime.now().isoformat(),
             "inputs": submitted,
             "feedback": full_feedback,

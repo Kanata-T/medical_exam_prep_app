@@ -411,4 +411,4 @@ if __name__ == "__main__":
     main()
 
     # セッション状態の自動保存
-    auto_save_session(page_key="interview")
+    auto_save_session()

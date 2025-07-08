@@ -362,6 +362,223 @@ def score_reading_stream(abstract, translation, opinion):
         
         yield type('ErrorChunk', (), {'text': error_msg})()
 
+def get_exam_style_scoring_prompt(content, translation, opinion, format_type, task_instruction=""):
+    """
+    過去問スタイル用の採点プロンプトを生成します。
+    
+    Args:
+        content: 出題内容（Letterまたはコメント形式のデータ）
+        translation: 受験者の翻訳
+        opinion: 受験者の意見（Letter形式の場合のみ）
+        format_type: 出題形式 ("letter_translation_opinion" or "paper_comment_translation_opinion")
+        task_instruction: 課題指示文
+    
+    Returns:
+        str: 採点用プロンプト
+    """
+    if format_type == "letter_translation_opinion":
+        return f"""あなたは県総採用試験の過去問スタイル（Letter形式）の経験豊富な採点者です。以下の答案を厳正かつ公平に採点してください。評価は出力制限を気にせず細かく可能な限り書いてください。
+
+【過去問スタイル出題】
+課題: {task_instruction}
+
+【出題Letter】
+{content}
+
+【受験者の回答】
+■ 課題1: Letterの日本語訳
+{translation}
+
+■ 課題2: Letterに対する意見
+{opinion}
+
+【採点基準】
+各項目を10点満点で評価してください。
+
+1. **日本語訳 (10点満点)**
+   - 正確性 (4点): 専門用語や文脈の理解度、統計データの正確な翻訳
+   - 流暢性 (3点): 自然で読みやすい日本語表現
+   - 完成度 (3点): 全体的なまとまりと訳し漏れの有無
+
+2. **意見 (10点満点)**
+   - 理解度 (4点): Letterの内容と論点を正確に把握
+   - 論理性 (4点): 筋道立った議論の展開
+   - 独創性 (2点): 独自の視点や深い洞察
+
+【出力形式】
+必ず以下の形式で出力してください：
+
+**スコア:**
+```json
+{{
+  "日本語訳": [1-10の整数],
+  "意見": [1-10の整数]
+}}
+```
+
+## 総合評価
+[20点満点中の得点と全体的なコメント]
+
+## 課題1: 日本語訳の評価
+**良い点:**
+- [具体的な良い点を記述。どの表現が良かったかを記載してください。]
+
+**改善点:**
+- [具体的な改善点を記述。どの表現が改善すべきか。また、改善するとしたらどのようにすべきかを記載してください。]
+
+**模範訳例:**
+- [重要な専門用語や統計データについて、より適切な日本語表現を提示してください。]
+
+## 課題2: 意見の評価
+**良い点:**
+- [具体的な良い点を記述。どの観点や論理展開が良かったかを記載してください。]
+
+**改善点:**
+- [具体的な改善点を記述。論理性、理解度、考察の深さなどについて改善すべき点を記載してください。]
+
+**意見のヒント:**
+- [このLetterに関して、より深い考察につながるような観点や視点を提示してください。]
+
+## 学習アドバイス
+[医学英語読解力向上のための具体的なアドバイス]
+"""
+    
+    else:  # paper_comment_translation_opinion
+        paper_summary = content.get('paper_summary', '') if isinstance(content, dict) else ""
+        comment_text = content.get('comment', '') if isinstance(content, dict) else ""
+        
+        return f"""あなたは県総採用試験の過去問スタイル（論文コメント形式）の経験豊富な採点者です。以下の答案を厳正かつ公平に採点してください。評価は出力制限を気にせず細かく可能な限り書いてください。
+
+【過去問スタイル出題】
+課題: {task_instruction}
+
+【論文概要】
+{paper_summary}
+
+【コメント】
+{comment_text}
+
+【受験者の回答】
+■ 統合回答（翻訳 + 意見）
+{translation}
+
+【採点基準】
+以下の観点で10点満点で評価してください。
+
+1. **翻訳部分 (5点満点)**
+   - 正確性 (3点): コメントの内容を正確に理解し翻訳
+   - 表現力 (2点): 自然で読みやすい日本語表現
+
+2. **意見部分 (5点満点)**
+   - 理解度 (2点): コメントの論点を正確に把握
+   - 論理性 (2点): 筋道立った意見の展開
+   - 独創性 (1点): 独自の視点や深い洞察
+
+【出力形式】
+必ず以下の形式で出力してください：
+
+**スコア:**
+```json
+{{
+  "統合回答": [1-10の整数]
+}}
+```
+
+## 総合評価
+[10点満点中の得点と全体的なコメント]
+
+## 翻訳部分の評価
+**良い点:**
+- [具体的な良い点を記述。どの表現が良かったかを記載してください。]
+
+**改善点:**
+- [具体的な改善点を記述。どの表現が改善すべきか。また、改善するとしたらどのようにすべきかを記載してください。]
+
+**模範訳例:**
+- [重要な表現について、より適切な日本語表現を提示してください。]
+
+## 意見部分の評価
+**良い点:**
+- [具体的な良い点を記述。どの観点や論理展開が良かったかを記載してください。]
+
+**改善点:**
+- [具体的な改善点を記述。論理性、理解度、考察の深さなどについて改善すべき点を記載してください。]
+
+**意見のヒント:**
+- [このコメントに関して、より深い考察につながるような観点や視点を提示してください。]
+
+## 学習アドバイス
+[医学英語読解力向上のための具体的なアドバイス]
+"""
+
+def score_exam_style_stream(content, translation, opinion, format_type, task_instruction=""):
+    """
+    過去問スタイルの提出物を採点し、結果をストリーミングで返す。
+    
+    Args:
+        content: 出題内容（Letterまたはコメント形式のデータ）
+        translation: 受験者の翻訳
+        opinion: 受験者の意見（Letter形式の場合のみ）
+        format_type: 出題形式
+        task_instruction: 課題指示文
+    
+    Yields:
+        採点結果のストリーミングチャンク
+    """
+    # 入力検証
+    if not content:
+        yield type('ErrorChunk', (), {'text': "❌ 入力エラー: 出題内容が不足しています。"})()
+        return
+    
+    if not translation or len(translation.strip()) < 30:
+        yield type('ErrorChunk', (), {'text': "❌ 入力エラー: 翻訳を入力してください（最低30文字）。"})()
+        return
+    
+    if format_type == "letter_translation_opinion" and (not opinion or len(opinion.strip()) < 50):
+        yield type('ErrorChunk', (), {'text': "❌ 入力エラー: 意見を入力してください（最低50文字）。"})()
+        return
+    
+    try:
+        client = genai.Client()
+        prompt = get_exam_style_scoring_prompt(content, translation, opinion, format_type, task_instruction)
+        
+        # ストリーミング応答を生成
+        response_stream = client.models.generate_content_stream(
+            model='gemini-2.5-pro',
+            contents=prompt
+        )
+        
+        # レスポンスが有効かチェック
+        if not response_stream:
+            raise ScoringError("AI採点システムから応答が得られませんでした。")
+        
+        chunk_count = 0
+        for chunk in response_stream:
+            chunk_count += 1
+            if hasattr(chunk, 'text') and chunk.text:
+                yield chunk
+            else:
+                # 無効なチャンクの場合は警告を表示
+                yield type('WarningChunk', (), {
+                    'text': f"\n⚠️ [チャンク{chunk_count}] 応答形式が予期しない形式です。\n"
+                })()
+        
+        # チャンクが全く受信されなかった場合
+        if chunk_count == 0:
+            raise ScoringError("採点結果を取得できませんでした。")
+            
+    except ScoringError as e:
+        yield type('ErrorChunk', (), {'text': f"❌ 採点エラー: {str(e)}"})()
+    except Exception as e:
+        # 予期しないエラーの場合
+        error_msg = f"❌ システムエラーが発生しました: {str(e)}"
+        if "quota" in str(e).lower():
+            error_msg += "\n\n💡 API使用量の上限に達している可能性があります。しばらく時間をおいてから再試行してください。"
+        elif "authentication" in str(e).lower():
+            error_msg += "\n\n💡 API認証に問題があります。APIキーの設定を確認してください。"
+        
+        yield type('ErrorChunk', (), {'text': error_msg})()
+
 def get_reading_score_distribution():
     """
     英語読解採点基準の詳細説明を返します。
