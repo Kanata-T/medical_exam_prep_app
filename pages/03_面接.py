@@ -171,26 +171,56 @@ def render_mode_selection():
 def run_single_practice():
     st.markdown('<h1 class="main-header">面接対策 (単発練習)</h1>', unsafe_allow_html=True)
     
-    # 状態をローカル変数に展開
-    st.session_state.update(st.session_state.single_practice_vars)
-
+    # 状態をローカル変数に展開（個別に参照）
+    vars_dict = st.session_state.single_practice_vars
+    
     # 完了後の表示
-    if st.session_state.completed and st.session_state.results:
-        st.success("評価が完��しました。")
+    if vars_dict.get('completed', False) and vars_dict.get('results'):
+        st.success("評価が完了しました。")
         st.markdown("### 評価結果")
         with st.container(border=True):
-            st.markdown(st.session_state.results)
+            st.markdown(vars_dict['results'])
         
-        if st.button("新しい質問で練習", type="primary"):
-            st.session_state.single_practice_vars = {
-                'question': "", 'category': "", 'step': 'setup', 'completed': False, 
-                'results': None, 'user_answer': "", 'start_time': 0, 'play_question_audio': False
-            }
-            st.rerun()
+        # 追加質問機能
+        from modules.utils import render_followup_chat, clear_followup_chat
+        
+        # 元のコンテンツを準備
+        original_content = {
+            'question': vars_dict.get('question', ''),
+            'answer': vars_dict.get('user_answer', '')
+        }
+        
+        # 追加質問チャット機能
+        render_followup_chat(
+            original_content=original_content,
+            original_results=vars_dict['results'],
+            question_type="面接",
+            session_key="interview_followup"
+        )
+        
+        # アクションボタン
+        st.markdown("---")
+        st.markdown("#### 次のアクション")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("新しい質問で練習", type="primary", use_container_width=True):
+                # チャット履歴もクリア
+                clear_followup_chat("interview_followup")
+                st.session_state.single_practice_vars = {
+                    'question': "", 'category': "", 'step': 'setup', 'completed': False, 
+                    'results': None, 'user_answer': "", 'start_time': 0, 'play_question_audio': False
+                }
+                st.rerun()
+        
+        with col2:
+            if st.button("質問履歴をクリア", use_container_width=True):
+                clear_followup_chat("interview_followup")
+                st.rerun()
+        
         return
 
     # セットアップ
-    if st.session_state.step == 'setup':
+    if vars_dict.get('step') == 'setup':
         with st.container(border=True):
             st.markdown("### 質問の選択")
             question_categories = get_interview_question_categories()
@@ -214,26 +244,26 @@ def run_single_practice():
                     st.rerun()
 
     # 回答
-    elif st.session_state.step == 'answering':
+    elif vars_dict.get('step') == 'answering':
         st.markdown("#### 面接官からの質問")
-        st.info(f"##### 「{st.session_state.question}」")
+        st.info(f"##### 「{vars_dict.get('question', '')}」")
 
         audio_placeholder = st.empty()
-        if st.session_state.get('play_question_audio', False):
-            audio_html = create_audio_html(st.session_state.question, autoplay=True)
+        if vars_dict.get('play_question_audio', False):
+            audio_html = create_audio_html(vars_dict.get('question', ''), autoplay=True)
             if audio_html: 
                 audio_placeholder.markdown(audio_html, unsafe_allow_html=True)
-            st.session_state.play_question_audio = False # Ensure this block runs only once
+            st.session_state.single_practice_vars['play_question_audio'] = False # Ensure this block runs only once
             
             # Automatically start voice recognition after playing audio
             st.info("質問の再生が終わったら、回答の音声認識が自動で始まります。")
             recognized_text = safe_recognize_speech()
             if recognized_text:
-                st.session_state.user_answer = recognized_text
+                st.session_state.single_practice_vars['user_answer'] = recognized_text
                 st.rerun()
 
-        answer = st.text_area("あなたの回答（音声認識後に編集できます）", height=250, value=st.session_state.user_answer)
-        st.session_state.user_answer = answer
+        answer = st.text_area("あなたの回答（音声認識後に編集できます）", height=250, value=vars_dict.get('user_answer', ''))
+        st.session_state.single_practice_vars['user_answer'] = answer
         
         col1, col2 = st.columns([1,1])
         with col1:
@@ -241,26 +271,26 @@ def run_single_practice():
                 if st.button("🎤 もう一度音声で入力する", use_container_width=True):
                     recognized_text = safe_recognize_speech()
                     if recognized_text:
-                        st.session_state.user_answer = recognized_text
+                        st.session_state.single_practice_vars['user_answer'] = recognized_text
                         st.rerun()
         
         with col2:
             if st.button("回答を提出して評価を受ける", type="primary", disabled=len(answer) < 10, use_container_width=True):
-                st.session_state.step = 'scoring'
+                st.session_state.single_practice_vars['step'] = 'scoring'
                 st.rerun()
 
     # 評価
-    elif st.session_state.step == 'scoring':
+    elif vars_dict.get('step') == 'scoring':
         st.info("AIが評価中です...")
-        stream = score_interview_answer_stream(st.session_state.question, st.session_state.user_answer)
+        stream = score_interview_answer_stream(vars_dict.get('question', ''), vars_dict.get('user_answer', ''))
         with st.container(border=True):
             feedback = st.write_stream(stream)
-        st.session_state.results = feedback
-        st.session_state.completed = True
+        st.session_state.single_practice_vars['results'] = feedback
+        st.session_state.single_practice_vars['completed'] = True
         # 履歴保存
         history_data = {
             "type": "面接対策(単発)", "date": datetime.now().isoformat(),
-            "inputs": {"question": st.session_state.question, "answer": st.session_state.user_answer},
+            "inputs": {"question": vars_dict.get('question', ''), "answer": vars_dict.get('user_answer', '')},
             "feedback": feedback, "scores": extract_scores(feedback)
         }
         save_history(history_data)
@@ -342,7 +372,7 @@ def run_session_practice():
 
     elif state['state'] == 'completed':
         st.success("模擬面接セッションが完了しました。お疲れ様でした！")
-        st.info("最終評価は上記チャッ���履歴の末尾に記載されています。")
+        st.info("最終評価は上記チャット履歴の末尾に記載されています。")
         if st.button("新しいセッションを始める", type="primary"):
             st.session_state.session_practice_vars = {
                 'state': 'not_started', 'chat_history': [], 
@@ -380,5 +410,5 @@ def main():
 if __name__ == "__main__":
     main()
 
-    # セッ��ョン状態の自動保存
+    # セッション状態の自動保存
     auto_save_session(page_key="interview")

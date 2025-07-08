@@ -98,19 +98,44 @@ if st.session_state.essay_completed and st.session_state.essay_results:
     with st.container(border=True):
         st.markdown(st.session_state.essay_results)
     
+    # 追加質問機能
+    from modules.utils import render_followup_chat, clear_followup_chat
+    
+    # 元のコンテンツを準備
+    original_content = {
+        'theme': st.session_state.long_essay_theme,
+        'memo': st.session_state.get('submitted_data', {}).get('memo', ''),
+        'essay': st.session_state.get('submitted_data', {}).get('essay', '')
+    }
+    
+    # 追加質問チャット機能
+    render_followup_chat(
+        original_content=original_content,
+        original_results=st.session_state.essay_results,
+        question_type="小論文",
+        session_key="essay_followup"
+    )
+    
     # アクションボタン
     st.markdown("---")
     st.markdown("#### 次のアクション")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("新しいテーマで練習", type="primary", use_container_width=True):
+            # チャット履歴もクリア
+            clear_followup_chat("essay_followup")
             for var in session_vars:
                 st.session_state[var] = session_vars[var]
             st.rerun()
     
     with col2:
+        if st.button("質問履歴をクリア", use_container_width=True):
+            clear_followup_chat("essay_followup")
+            st.rerun()
+    
+    with col3:
         if st.button("学習履歴を見る", use_container_width=True):
-            st.switch_page("pages/4_📊_学習履歴.py") # 後でファイル名変更を反映
+            st.switch_page("pages/04_学習履歴.py")
     
     st.stop()
 

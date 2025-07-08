@@ -370,3 +370,423 @@ def reset_session_state(keys_to_reset):
     for key in keys_to_reset:
         if key in st.session_state:
             del st.session_state[key]
+
+def answer_followup_question_stream(original_content, original_results, question, question_type="一般"):
+    """
+    元の結果に基づいて追加質問に回答するストリーミング関数
+    
+    Args:
+        original_content (dict): 元の提出内容（課題、回答など）
+        original_results (str): 元のAI評価結果
+        question (str): ユーザーからの追加質問
+        question_type (str): 質問の種類（"小論文"、"面接"、"一般"）
+    
+    Yields:
+        応答のストリーミングチャンク
+    """
+    try:
+        client = genai.Client()
+        
+        # 質問種類に応じたプロンプト生成
+        if question_type == "小論文":
+            context_prompt = f"""
+# 前提情報
+あなたは先ほど以下の小論文を採点しました：
+
+【テーマ】
+{original_content.get('theme', '')}
+
+【構成メモ】
+{original_content.get('memo', '')}
+
+【清書】
+{original_content.get('essay', '')}
+
+【あなたの採点結果】
+{original_results}
+
+# 指示
+上記の採点結果について、学習者から以下の質問がありました。
+採点結果の内容を踏まえ、具体的で建設的なアドバイスを提供してください。
+回答は丁寧で分かりやすく、学習者の理解を深めるものにしてください。
+
+【学習者からの質問】
+{question}
+"""
+        elif question_type == "面接":
+            context_prompt = f"""
+# 前提情報
+あなたは先ほど以下の面接練習を評価しました：
+
+【面接質問】
+{original_content.get('question', '')}
+
+【回答】
+{original_content.get('answer', '')}
+
+【あなたの評価結果】
+{original_results}
+
+# 指示
+上記の評価結果について、学習者から以下の質問がありました。
+評価結果の内容を踏まえ、面接スキル向上に繋がる具体的で実践的なアドバイスを提供してください。
+回答は丁寧で分かりやすく、学習者の成長を支援するものにしてください。
+
+【学習者からの質問】
+{question}
+"""
+        else:
+            context_prompt = f"""
+# 前提情報
+あなたは学習者の課題について以下の評価を行いました：
+
+【元の内容】
+{json.dumps(original_content, ensure_ascii=False, indent=2)}
+
+【あなたの評価結果】
+{original_results}
+
+# 指示
+上記の評価結果について、学習者から以下の質問がありました。
+評価結果の内容を踏まえ、具体的で建設的なアドバイスを提供してください。
+
+【学習者からの質問】
+{question}
+"""
+        
+        # ストリーミング応答を生成
+        response_stream = client.models.generate_content_stream(
+            model='gemini-2.5-flash',
+            contents=context_prompt
+        )
+        
+        for chunk in response_stream:
+            if hasattr(chunk, 'text') and chunk.text:
+                yield chunk
+            
+    except Exception as e:
+        # エラーが発生した場合のダミーチャンク
+        error_msg = f"申し訳ございません。回答生成中にエラーが発生しました: {str(e)}"
+        yield type('ErrorChunk', (), {'text': error_msg})()
+
+def render_followup_chat(original_content, original_results, question_type="一般", session_key="followup_chat"):
+    """
+    追加質問用のチャットUIを描画する
+    
+    Args:
+        original_content (dict): 元の提出内容
+        original_results (str): 元のAI評価結果
+        question_type (str): 質問の種類
+        session_key (str): セッション状態のキー
+    """
+    # セッション状態の初期化
+    chat_key = f"{session_key}_history"
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = []
+    
+    st.markdown("---")
+    st.markdown("### 💬 結果について質問する")
+    st.markdown("上記の評価結果について、詳しく知りたいことがあれば気軽に質問してください。")
+    
+    # チャット履歴の表示
+    chat_container = st.container()
+    with chat_container:
+        for i, msg in enumerate(st.session_state[chat_key]):
+            if msg["role"] == "user":
+                st.chat_message("user").markdown(msg["content"])
+            else:
+                st.chat_message("assistant").markdown(msg["content"])
+    
+    # 質問入力
+    if prompt := st.chat_input("質問を入力してください（例：この部分はどう改善すれば良いですか？）"):
+        # ユーザーの質問を履歴に追加
+        st.session_state[chat_key].append({"role": "user", "content": prompt})
+        
+        # ユーザーの質問を表示
+        with chat_container:
+            st.chat_message("user").markdown(prompt)
+        
+        # AIの回答を生成・表示
+        with chat_container:
+            with st.chat_message("assistant"):
+                response_placeholder = st.empty()
+                full_response = ""
+                
+                # ストリーミング応答
+                try:
+                    stream = answer_followup_question_stream(
+                        original_content, 
+                        original_results, 
+                        prompt, 
+                        question_type
+                    )
+                    
+                    for chunk in stream:
+                        if hasattr(chunk, 'text') and chunk.text:
+                            full_response += chunk.text
+                            response_placeholder.markdown(full_response + "▌")
+                    
+                    response_placeholder.markdown(full_response)
+                    
+                    # AIの回答を履歴に追加
+                    st.session_state[chat_key].append({"role": "assistant", "content": full_response})
+                    
+                except Exception as e:
+                    error_msg = f"申し訳ございません。回答生成中にエラーが発生しました: {str(e)}"
+                    response_placeholder.error(error_msg)
+                    st.session_state[chat_key].append({"role": "assistant", "content": error_msg})
+        
+        # 表示を更新
+        st.rerun()
+
+def clear_followup_chat(session_key="followup_chat"):
+    """
+    追加質問のチャット履歴をクリアする
+    
+    Args:
+        session_key (str): セッション状態のキー
+    """
+    chat_key = f"{session_key}_history"
+    if chat_key in st.session_state:
+        st.session_state[chat_key] = []
+
+def get_recent_themes(practice_type: str, limit: int = 5) -> list:
+    """
+    指定された練習タイプの最近のテーマを取得します。
+    
+    Args:
+        practice_type (str): 練習タイプ（"自由記述"など）
+        limit (int): 取得する最大件数
+    
+    Returns:
+        list: 最近使用されたテーマのリスト
+    """
+    try:
+        history = load_history()
+        recent_themes = []
+        
+        for item in history:
+            if item.get('type') == practice_type:
+                theme = item.get('inputs', {}).get('theme')
+                if theme and theme not in recent_themes:
+                    recent_themes.append(theme)
+                    if len(recent_themes) >= limit:
+                        break
+        
+        return recent_themes
+    except Exception as e:
+        st.warning(f"最近のテーマ取得中にエラーが発生しました: {e}")
+        return []
+
+def get_theme_history(practice_type: str, theme: str) -> list:
+    """
+    指定されたテーマの過去の成績履歴を取得します。
+    
+    Args:
+        practice_type (str): 練習タイプ（"自由記述"など）
+        theme (str): 検索するテーマ
+    
+    Returns:
+        list: 過去の成績データのリスト（日付の新しい順）
+    """
+    try:
+        history = load_history()
+        theme_history = []
+        
+        for item in history:
+            if (item.get('type') == practice_type and 
+                item.get('inputs', {}).get('theme') == theme):
+                
+                # スコアが存在する場合のみ追加
+                if item.get('scores'):
+                    theme_data = {
+                        'date': item.get('date'),
+                        'scores': item.get('scores'),
+                        'feedback': item.get('feedback', ''),
+                        'answer': item.get('inputs', {}).get('answer', '')
+                    }
+                    theme_history.append(theme_data)
+        
+        # 日付順でソート（新しい順）
+        theme_history.sort(key=lambda x: x['date'], reverse=True)
+        return theme_history
+        
+    except Exception as e:
+        st.warning(f"テーマ履歴取得中にエラーが発生しました: {e}")
+        return []
+
+def is_theme_recently_used(practice_type: str, theme: str, recent_limit: int = 3) -> bool:
+    """
+    指定されたテーマが最近使用されたかチェックします。
+    
+    Args:
+        practice_type (str): 練習タイプ
+        theme (str): チェックするテーマ
+        recent_limit (int): 最近の件数
+    
+    Returns:
+        bool: 最近使用されている場合True
+    """
+    recent_themes = get_recent_themes(practice_type, recent_limit)
+    return theme in recent_themes
+
+def calculate_progress_stats(theme_history: list) -> dict:
+    """
+    テーマの履歴から進歩統計を計算します。
+    
+    Args:
+        theme_history (list): テーマの履歴データ
+    
+    Returns:
+        dict: 進歩統計の辞書
+    """
+    if len(theme_history) < 2:
+        return {"has_progress": False}
+    
+    try:
+        # 最新と最古の結果を比較
+        latest = theme_history[0]
+        oldest = theme_history[-1]
+        
+        # 平均スコアの計算
+        latest_avg = sum(latest['scores'].values()) / len(latest['scores']) if latest['scores'] else 0
+        oldest_avg = sum(oldest['scores'].values()) / len(oldest['scores']) if oldest['scores'] else 0
+        
+        # 改善度の計算
+        improvement = latest_avg - oldest_avg
+        improvement_percentage = (improvement / oldest_avg * 100) if oldest_avg > 0 else 0
+        
+        # カテゴリ別の改善
+        category_improvements = {}
+        if latest['scores'] and oldest['scores']:
+            for category in set(latest['scores'].keys()) & set(oldest['scores'].keys()):
+                category_improvements[category] = latest['scores'][category] - oldest['scores'][category]
+        
+        return {
+            "has_progress": True,
+            "attempts": len(theme_history),
+            "latest_avg": latest_avg,
+            "oldest_avg": oldest_avg,
+            "improvement": improvement,
+            "improvement_percentage": improvement_percentage,
+            "category_improvements": category_improvements,
+            "latest_date": latest['date'],
+            "oldest_date": oldest['date']
+        }
+        
+    except Exception as e:
+        st.warning(f"進歩統計計算中にエラーが発生しました: {e}")
+        return {"has_progress": False}
+
+def render_progress_comparison(theme: str, theme_history: list):
+    """
+    テーマの進歩比較を表示します。
+    
+    Args:
+        theme (str): テーマ名
+        theme_history (list): テーマの履歴データ
+    """
+    if not theme_history:
+        return
+    
+    progress_stats = calculate_progress_stats(theme_history)
+    
+    if not progress_stats.get("has_progress"):
+        if len(theme_history) == 1:
+            st.info(f"📊 「{theme}」は初回の挑戦です。次回以降、進歩を確認できます。")
+        return
+    
+    st.markdown("---")
+    st.markdown("### 📈 進歩の分析")
+    
+    attempts = progress_stats["attempts"]
+    improvement = progress_stats["improvement"]
+    improvement_percentage = progress_stats["improvement_percentage"]
+    
+    # 進歩の概要
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="挑戦回数",
+            value=f"{attempts}回"
+        )
+    
+    with col2:
+        st.metric(
+            label="平均スコア改善",
+            value=f"{improvement:+.1f}",
+            delta=f"{improvement_percentage:+.1f}%"
+        )
+    
+    with col3:
+        if improvement > 0:
+            st.success("📈 成長しています！")
+        elif improvement < 0:
+            st.warning("📉 前回より下がりました")
+        else:
+            st.info("📊 同じレベルです")
+    
+    # カテゴリ別の改善
+    if progress_stats.get("category_improvements"):
+        st.markdown("#### カテゴリ別の改善度")
+        improvements = progress_stats["category_improvements"]
+        
+        for category, change in improvements.items():
+            color = "normal"
+            if change > 0:
+                color = "normal"
+                icon = "📈"
+                delta_color = "normal"
+            elif change < 0:
+                color = "normal"
+                icon = "📉"
+                delta_color = "inverse"
+            else:
+                color = "normal"
+                icon = "📊"
+                delta_color = "off"
+            
+            st.metric(
+                label=f"{icon} {category}",
+                value=theme_history[0]['scores'].get(category, 0),
+                delta=change,
+                delta_color=delta_color
+            )
+    
+    # 過去の成績一覧
+    with st.expander("📋 過去の成績を確認"):
+        for i, record in enumerate(theme_history):
+            date_str = datetime.fromisoformat(record['date']).strftime('%Y/%m/%d %H:%M')
+            st.markdown(f"**{i+1}回目** ({date_str})")
+            
+            if record['scores']:
+                score_cols = st.columns(len(record['scores']))
+                for j, (category, score) in enumerate(record['scores'].items()):
+                    with score_cols[j]:
+                        st.metric(category, f"{score}点")
+            else:
+                st.text("スコアなし")
+            
+            if i < len(theme_history) - 1:  # 最後の要素でなければ区切り線
+                st.markdown("---")
+
+def save_recent_theme(theme: str):
+    """
+    最近使用したテーマをセッション状態に保存します。
+    
+    Args:
+        theme (str): 保存するテーマ
+    """
+    if 'recent_knowledge_themes' not in st.session_state:
+        st.session_state.recent_knowledge_themes = []
+    
+    # 重複を避けて先頭に追加
+    if theme in st.session_state.recent_knowledge_themes:
+        st.session_state.recent_knowledge_themes.remove(theme)
+    
+    st.session_state.recent_knowledge_themes.insert(0, theme)
+    
+    # 最大5件まで保持
+    if len(st.session_state.recent_knowledge_themes) > 5:
+        st.session_state.recent_knowledge_themes = st.session_state.recent_knowledge_themes[:5]

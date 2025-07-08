@@ -50,13 +50,14 @@ def find_medical_paper(keywords=None):
     if keywords:
         is_valid, error_msg = validate_keywords(keywords)
         if not is_valid:
-            return {
-                "title": "",
-                "abstract": "",
-                "citations": [],
-                "keywords_used": "",
-                "error": error_msg
-            }
+                    return {
+            "title": "",
+            "abstract": "",
+            "citations": [],
+            "keywords_used": "",
+            "category": "",
+            "error": error_msg
+        }
         keywords_used = keywords
     else:
         # キーワードがない場合は、AIに国家試験範囲内で生成させる
@@ -67,57 +68,63 @@ def find_medical_paper(keywords=None):
                 "abstract": "",
                 "citations": [],
                 "keywords_used": "",
+                "category": "",
                 "error": f"キーワード生成エラー: {keyword_result['error']}"
             }
         keywords_used = keyword_result['keywords']
+        generated_category = keyword_result.get('category', '')
     
     def _fallback_search_paper(keywords_used, client):
-        """フォールバック: 通常のテキスト生成で論文検索"""
+        """フォールバック1: Google検索ツール付きでの再試行"""
+        print("フォールバック1: Google検索ツール付きで再試行")
         tool = Tool(google_search=GoogleSearch())
         config = GenerateContentConfig(tools=[tool])
         
-        fallback_prompt = f"""医学文献検索の専門家として、キーワード「{keywords_used}」に関連する医学論文をPubMedから1つ見つけてください。
+        fallback_prompt = f"""医学文献検索の専門家として、キーワード「{keywords_used}」に関連する医学論文をPubMedから1つ検索し、以下の形式で出力してください：
 
-以下の形式で出力してください：
+TITLE: [論文の正確なタイトル]
+ABSTRACT: [Abstract完全版・省略禁止]
+STUDY_TYPE: [研究デザインの種類]
+PMID: [PubMed ID]
 
-TITLE: [論文のタイトル]
-ABSTRACT: [Abstract全文]
-STUDY_TYPE: [研究の種類]
+**Abstract抽出の重要指示:**
+- Background, Methods, Results, Conclusionsの全セクションを含める
+- Results部分の統計データ（p値、信頼区間、オッズ比、症例数、パーセンテージなど）を省略禁止
+- 数値データや治療効果の詳細を必ず含める
+- 要約や短縮は一切行わない
+- 論文のAbstractに記載されている内容を完全に転写
 
-重要な条件:
-- PubMedから実際の論文を検索してください
-- Abstractは100文字以上の内容を含めてください
-- 臨床的に重要性の高い論文を選択してください
+**必須条件:**
+- 必ずPubMedで実際に検索を行ってください
+- 実在する論文のみを報告してください
+- Abstractは最低200文字以上の完全版を含めてください
+- 架空の論文データは禁止です
 
-検索サイト: site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
+検索対象: site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=fallback_prompt,
-            config=config,
-        )
-        
-        if not response or not response.text:
-            # 最終フォールバック: サンプル論文データ
-            fallback_citations = [{
-                "uri": f"https://pubmed.ncbi.nlm.nih.gov/?term={keywords_used.replace(' ', '+')}",
-                "title": f"PubMed検索: {keywords_used}"
-            }]
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=fallback_prompt,
+                config=config,
+            )
             
-            return {
-                "title": f"Clinical Study on {keywords_used}: A Systematic Review",
-                "abstract": f"Background: This systematic review examines recent advances in {keywords_used} research. Methods: We conducted a comprehensive search of medical databases for studies published between 2019-2024. Results: Multiple studies demonstrated significant clinical improvements with modern treatment approaches. The evidence suggests that targeted interventions show promise for better patient outcomes. Conclusion: Current research supports the continued investigation of {keywords_used} in clinical practice. Further randomized controlled trials are needed to establish definitive treatment protocols and optimize patient care strategies.",
-                "study_type": "Systematic Review",
-                "relevance_score": 8,
-                "citations": fallback_citations,
-                "keywords_used": keywords_used
-            }
+            if response and response.text:
+                return _parse_fallback_response(response.text, keywords_used)
+            else:
+                raise Exception("Google検索ツール付きフォールバックも応答なし")
+                
+        except Exception as e:
+            print(f"Google検索ツール付きフォールバック失敗: {e}")
+            return _fallback_no_tools(keywords_used, client)
         
-        # テキストを解析してデータを抽出
-        text = response.text.strip()
+    def _parse_fallback_response(response_text, keywords_used):
+        """フォールバック応答のテキストを解析"""
+        text = response_text.strip()
         title = ""
         abstract = ""
         study_type = "Unknown"
+        pmid = ""
         
         # タイトルを抽出
         title_match = re.search(r'TITLE:\s*(.+?)(?=\n|ABSTRACT:|$)', text, re.IGNORECASE | re.DOTALL)
@@ -125,48 +132,124 @@ STUDY_TYPE: [研究の種類]
             title = title_match.group(1).strip()
         
         # Abstractを抽出
-        abstract_match = re.search(r'ABSTRACT:\s*(.+?)(?=\nSTUDY_TYPE:|$)', text, re.IGNORECASE | re.DOTALL)
+        abstract_match = re.search(r'ABSTRACT:\s*(.+?)(?=\nSTUDY_TYPE:|PMID:|$)', text, re.IGNORECASE | re.DOTALL)
         if abstract_match:
             abstract = abstract_match.group(1).strip()
         
         # 研究種別を抽出
-        study_match = re.search(r'STUDY_TYPE:\s*(.+?)(?=\n|$)', text, re.IGNORECASE)
+        study_match = re.search(r'STUDY_TYPE:\s*(.+?)(?=\n|PMID:|$)', text, re.IGNORECASE)
         if study_match:
             study_type = study_match.group(1).strip()
         
-        # データが不足している場合は最終フォールバック
-        if not title or len(abstract) < 100:
-            fallback_citations = [{
-                "uri": f"https://pubmed.ncbi.nlm.nih.gov/?term={keywords_used.replace(' ', '+')}",
-                "title": f"PubMed検索: {keywords_used}"
-            }]
-            
-            return {
-                "title": f"Recent Advances in {keywords_used}: A Clinical Review",
-                "abstract": f"Background: {keywords_used} represents an important area of clinical medicine with significant implications for patient care. This review examines current evidence and treatment approaches. Methods: A comprehensive literature review was conducted using major medical databases. Studies were selected based on clinical relevance and methodological quality. Results: Recent research demonstrates improved understanding of pathophysiology and treatment options. Clinical trials show promising results for new therapeutic interventions. Patient outcomes have improved with evidence-based approaches. Conclusion: Continued research in {keywords_used} is essential for advancing clinical practice and improving patient care outcomes.",
-                "study_type": "Clinical Review",
-                "relevance_score": 7,
-                "citations": fallback_citations,
-                "keywords_used": keywords_used
-            }
+        # PMIDを抽出
+        pmid_match = re.search(r'PMID:\s*(\d+)', text, re.IGNORECASE)
+        if pmid_match:
+            pmid = pmid_match.group(1).strip()
         
-        # フォールバック用の引用情報を生成
-        fallback_citations = [{
+        # 引用情報を生成
+        citations = []
+        if pmid:
+            citations.append({
+                "uri": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                "title": f"PMID: {pmid} - {title[:80]}..."
+            })
+        
+        # PubMed検索URLも追加
+        citations.append({
             "uri": f"https://pubmed.ncbi.nlm.nih.gov/?term={keywords_used.replace(' ', '+')}",
             "title": f"PubMed検索: {keywords_used}"
-        }]
+        })
         
-        return {
+        # データ検証（完全版Abstract用）
+        if not title or len(abstract) < 150:
+            raise Exception("抽出されたAbstractが不十分です（完全版が必要）")
+        
+        result = {
             "title": title,
             "abstract": abstract,
             "study_type": study_type,
             "relevance_score": 7,
-            "citations": fallback_citations,
-            "keywords_used": keywords_used
+            "citations": citations,
+            "keywords_used": keywords_used,
+            "category": "フォールバック検索"
         }
+        
+        # フォールバック成功時の履歴保存
+        from modules.utils import save_history
+        from datetime import datetime
+        
+        history_data = {
+            "type": "論文検索",
+            "date": datetime.now().isoformat(),
+            "keywords": keywords_used,
+            "category": "フォールバック検索",
+            "title": title,
+            "study_type": study_type,
+            "relevance_score": 7,
+            "citations_count": len(citations),
+            "abstract_length": len(abstract),
+            "success": True,
+            "fallback_used": True
+        }
+        save_history(history_data)
+        
+        print(f"フォールバック検索成功 - 履歴保存:")
+        print(f"  - キーワード: {keywords_used}")
+        print(f"  - タイトル: {title[:50]}...")
+        
+        return result
+    
+    def _fallback_no_tools(keywords_used, client):
+        """フォールバック2: ツールなしでの直接指示"""
+        print("フォールバック2: ツールなしで直接PubMed検索指示")
+        
+        no_tools_prompt = f"""あなたはPubMedでの医学文献検索の専門家です。以下の手順で実際の論文を検索してください：
+
+1. PubMedサイト (https://pubmed.ncbi.nlm.nih.gov/) にアクセス
+2. キーワード「{keywords_used}」で検索
+3. 最新の臨床的に重要な論文を1つ選択
+4. その論文の情報を以下の形式で報告
+
+**出力形式:**
+TITLE: [実際の論文タイトル]
+ABSTRACT: [実際のAbstract完全版]
+STUDY_TYPE: [研究デザイン]
+PMID: [PubMed ID]
+
+**Abstract抽出の厳格な指示:**
+- Background, Methods, Results, Conclusionsの全セクションを完全に含める
+- Results部分の統計データ（p値、信頼区間、オッズ比、相対リスク、症例数、パーセンテージ）を省略禁止
+- 数値データ、治療効果、副作用データの詳細を必ず含める
+- 要約や短縮は絶対に行わない
+- 論文のAbstractセクションの内容を一字一句正確に転写
+
+**重要な指示:**
+- 必ず実在する論文のみを報告してください
+- 架空の論文は絶対に作成しないでください
+- Abstractは実際の論文から完全版を正確に抽出してください
+- PubMedで検索可能な論文のみ選択してください
+
+検索キーワード: {keywords_used}
+検索サイト: https://pubmed.ncbi.nlm.nih.gov/"""
+
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=no_tools_prompt
+            )
+            
+            if response and response.text:
+                return _parse_fallback_response(response.text, keywords_used)
+            else:
+                raise Exception("ツールなしフォールバックも応答なし")
+                
+        except Exception as e:
+            print(f"ツールなしフォールバック失敗: {e}")
+            # 最終的にエラーを返す（架空データは使用しない）
+            raise Exception(f"全てのフォールバック処理が失敗しました: {e}")
     
     def _search_paper():
-        """内部の論文検索関数（JSONプロンプト使用）"""
+        """内部の論文検索関数（JSONプロンプト使用、リトライ機能付き）"""
         client = genai.Client()
         
         tool = Tool(google_search=GoogleSearch())
@@ -174,21 +257,31 @@ STUDY_TYPE: [研究の種類]
         
         # JSONプロンプト用のプロンプト
         prompt = f"""# 任務
-医学文献検索の専門家として、キーワード「{keywords_used}」に関連する高品質な医学論文をPubMedから1つ選定し、JSON形式で情報を抽出してください。
+医学文献検索の専門家として、キーワード「{keywords_used}」に関連する高品質な医学論文をPubMedなどから1つ選定し、JSON形式で情報を抽出してください。
 
 # 検索条件
-- 対象サイト: PubMed (site:pubmed.ncbi.nlm.nih.gov)
+- 対象サイト: PubMed (site:pubmed.ncbi.nlm.nih.gov)、または、Google Scholar (site:scholar.google.com)
 - キーワード: {keywords_used}
 - 優先度:
-  1. 臨床的重要性が高い論文（例：ガイドラインに記載されるような治療法や診断法に関する論文）
-  2. Impact factorが高い主要医学雑誌掲載論文
+    1. RCTやCase-Control Study形式の論文
+    2. 総説やReview論文、メタアナリシスは禁止
+    3. 臨床的重要性が高い論文（例：ガイドラインに記載されるような治療法や診断法に関する論文）
+    4. Impact factorが高い主要医学雑誌掲載論文（例：JAMA、Lancet、NEJM、BMJなど）
+
+# Abstract抽出の重要指示（必ず遵守）
+**一度論文全体を読み込んで、その後Abstractのみを完全に抽出してください：**
+- Background/Methods/Results/Conclusionsの全セクションを含める
+- Results部分の統計データ（p値、信頼区間、オッズ比、相対リスク、パーセンテージなど）を省略禁止
+- 数値データ、症例数、治療効果の詳細を必ず含める
+- 要約や短縮は一切行わない
+- 論文のAbstractセクションに記載されている内容を一字一句正確に転写
 
 # 出力形式（必須）
 以下のJSON形式で正確に出力してください。他の文字は一切含めないでください：
 
 {{
   "title": "論文の正確なタイトル（英語）",
-  "abstract": "Abstract全文（英語、改行なし）",
+  "abstract": "Abstract完全版（英語、改行なし、全セクション含む、統計データ省略禁止）",
   "relevance_score": 8,
   "study_type": "研究デザインの種類",
   "pubmed_url": "実際のPubMed論文のURL（https://pubmed.ncbi.nlm.nih.gov/数字/ の形式）",
@@ -201,56 +294,90 @@ STUDY_TYPE: [研究の種類]
 - PMIDは数字のみで記載してください
 
 # 品質基準
-- Abstractは100文字以上であること
+- Abstractは200文字以上であること（完全版のため）
 - タイトルとAbstractは実際の論文から正確に抽出すること
 - 医学的に信頼性の高い内容であること
+- Results部分に具体的な数値データが含まれていること
 
 site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=config,
-        )
-        
-        if not response or not response.text:
-            raise Exception("論文検索で有効な結果が得られませんでした。")
-        
-        # JSONの解析
-        try:
-            # レスポンステキストから純粋なJSONを抽出
-            response_text = response.text.strip()
-            
-            # JSONブロックを抽出（```json...```がある場合）
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-            if json_match:
-                response_text = json_match.group(1)
-            
-            # 先頭と末尾の不要なテキストを除去
-            start_brace = response_text.find('{')
-            end_brace = response_text.rfind('}') + 1
-            if start_brace != -1 and end_brace > start_brace:
-                response_text = response_text[start_brace:end_brace]
-            
-            paper_data = json.loads(response_text)
-            
-            # データ検証
-            required_fields = ["title", "abstract", "relevance_score", "study_type"]
-            optional_fields = ["pubmed_url", "pmid"]
-            
-            for field in required_fields:
-                if field not in paper_data:
-                    raise Exception(f"必須フィールド '{field}' が見つかりません。")
+        # 同じプロンプトで最大3回リトライ
+        last_error = None
+        for attempt in range(3):
+            try:
+                print(f"論文検索試行 {attempt + 1}/3")
+                
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=config,
+                )
+                
+                if not response or not response.text:
+                    raise Exception("論文検索で有効な結果が得られませんでした。")
+                
+                # JSONの解析
+                try:
+                    # レスポンステキストから純粋なJSONを抽出
+                    response_text = response.text.strip()
                     
-            if len(paper_data["abstract"]) < 100:
-                raise Exception("取得されたAbstractが短すぎます。")
+                    # 空文字列チェック
+                    if not response_text:
+                        raise Exception("レスポンステキストが空です。")
+                    
+                    # JSONブロックを抽出（```json...```がある場合）
+                    json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+                    if json_match:
+                        response_text = json_match.group(1)
+                    
+                    # 先頭と末尾の不要なテキストを除去
+                    start_brace = response_text.find('{')
+                    end_brace = response_text.rfind('}') + 1
+                    if start_brace != -1 and end_brace > start_brace:
+                        response_text = response_text[start_brace:end_brace]
+                    else:
+                        raise Exception("有効なJSON構造が見つかりませんでした。")
+                    
+                    # 最終的な空文字列チェック
+                    if not response_text or response_text.strip() == "":
+                        raise Exception("JSON抽出後にテキストが空になりました。")
+                    
+                    paper_data = json.loads(response_text)
+                    
+                    # データ検証
+                    required_fields = ["title", "abstract", "relevance_score", "study_type"]
+                    optional_fields = ["pubmed_url", "pmid"]
+                    
+                    for field in required_fields:
+                        if field not in paper_data:
+                            raise Exception(f"必須フィールド '{field}' が見つかりません。")
+                            
+                    if len(paper_data["abstract"]) < 200:
+                        raise Exception("取得されたAbstractが短すぎます（完全版が必要）。")
+                    
+                    # 成功した場合は以下の処理に進む
+                    break
+                    
+                except (json.JSONDecodeError, Exception) as e:
+                    last_error = e
+                    print(f"試行 {attempt + 1} JSONパースエラー: {e}")
+                    if attempt < 2:  # 最後の試行でなければ続行
+                        continue
+                    else:  # 最後の試行でもエラーの場合
+                        raise Exception(f"3回の試行すべてでJSONパース失敗: {last_error}")
+                        
+            except Exception as e:
+                last_error = e
+                print(f"試行 {attempt + 1} API呼び出しエラー: {e}")
+                if attempt < 2:  # 最後の試行でなければ続行
+                    continue
+                else:  # 最後の試行でもエラーの場合
+                    break
         
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"JSONプロンプト解析でエラー: {e}")
-            # フォールバック: 通常のテキスト生成で論文情報を取得
+        # 3回とも失敗した場合、フォールバックを使用
+        if last_error:
+            print(f"全ての試行が失敗、フォールバックを使用: {last_error}")
             return _fallback_search_paper(keywords_used, client)
-        
-
         
         # 引用情報の生成（JSONレスポンスベース + grounding_metadataフォールバック）
         citations = []
@@ -314,15 +441,63 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
             "study_type": paper_data["study_type"],
             "relevance_score": paper_data["relevance_score"],
             "citations": citations[:3],
-            "keywords_used": keywords_used
+            "keywords_used": keywords_used,
+            "category": paper_data.get("category", "")
         }
     
     # 安全なAPI呼び出し
     success, result = safe_api_call(_search_paper)
     
     if success:
+        # AI生成されたキーワードの場合、categoryを追加
+        if not keywords and 'generated_category' in locals():
+            result['category'] = generated_category
+        
+        # 論文検索成功時の履歴保存
+        from modules.utils import save_history
+        from datetime import datetime
+        
+        history_data = {
+            "type": "論文検索",
+            "date": datetime.now().isoformat(),
+            "keywords": result.get("keywords_used", ""),
+            "category": result.get("category", ""),
+            "title": result.get("title", ""),
+            "study_type": result.get("study_type", ""),
+            "relevance_score": result.get("relevance_score", 0),
+            "citations_count": len(result.get("citations", [])),
+            "abstract_length": len(result.get("abstract", "")),
+            "success": True
+        }
+        save_history(history_data)
+        
+        # デバッグ出力
+        print(f"論文検索成功 - 履歴保存:")
+        print(f"  - キーワード: {result.get('keywords_used', '')}")
+        print(f"  - 分野: {result.get('category', '')}")
+        print(f"  - タイトル: {result.get('title', '')[:50]}...")
+        
         return result
     else:
+        # 論文検索失敗時の履歴保存
+        from modules.utils import save_history
+        from datetime import datetime
+        
+        history_data = {
+            "type": "論文検索",
+            "date": datetime.now().isoformat(),
+            "keywords": keywords_used if 'keywords_used' in locals() else "",
+            "category": generated_category if not keywords and 'generated_category' in locals() else "",
+            "error": str(result),
+            "success": False
+        }
+        save_history(history_data)
+        
+        # デバッグ出力
+        print(f"論文検索失敗 - 履歴保存:")
+        print(f"  - キーワード: {keywords_used if 'keywords_used' in locals() else ''}")
+        print(f"  - エラー: {str(result)[:100]}...")
+        
         # エラー時でも最低限の引用情報を提供
         error_citations = [{
             "uri": f"https://pubmed.ncbi.nlm.nih.gov/?term={keywords_used.replace(' ', '+')}",
@@ -334,148 +509,242 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
             "abstract": "",
             "citations": error_citations,
             "keywords_used": keywords_used,
+            "category": generated_category if not keywords and 'generated_category' in locals() else "",
             "error": f"論文検索エラー: {result}"
         }
+
+# 医学分野リスト（分野名のみ）
+MEDICAL_FIELDS = [
+    "循環器学", "内分泌代謝学", "消化器学", "神経学", "腫瘍学", "感染症学", 
+    "救急医学", "精神医学", "呼吸器学", "腎泌尿器学", "整形外科学", "皮膚科学",
+    "眼科学", "耳鼻咽喉科学", "産婦人科学", "小児科学", "麻酔科学", "放射線科学"
+]
 
 def generate_medical_keywords():
     """
     医師国家試験範囲内の医学キーワードをAIが自動生成する。
+    過去5回とは異なる分野から選択される。
     
     Returns:
         dict: {
             "keywords": str,
+            "category": str,
             "error": str (optional)
         }
     """
+    
+    # 履歴から過去5回の分野を取得
+    keyword_history = get_keyword_history()
+    recent_categories = [item.get('category', '') for item in keyword_history[-5:] if item.get('category')]
+    
+    # 利用可能な分野を選択（過去5回と重複しない）
+    available_fields = [field for field in MEDICAL_FIELDS if field not in recent_categories]
+    
+    # 利用可能な分野がない場合は全分野を利用可能にする
+    if not available_fields:
+        available_fields = MEDICAL_FIELDS.copy()
+    
     def _generate_keywords():
-        """内部のキーワード生成関数（フォールバック付き）"""
+        """内部のキーワード生成関数（リトライ機能付きフォールバック）"""
         client = genai.Client()
         
-        # まずJSONプロンプトを試行
-        try:
-            config = GenerateContentConfig()
-            
-            prompt = """# 任務
+        config = GenerateContentConfig()
+        
+        # 過去5回のキーワード履歴を取得（デバッグ付き）
+        past_keywords = [item.get('keywords', '') for item in keyword_history[-5:] if item.get('keywords')]
+        past_keywords_text = ', '.join([f'"{kw}"' for kw in past_keywords]) if past_keywords else "なし"
+        
+        # デバッグ出力
+        print(f"履歴取得デバッグ:")
+        print(f"  - 総履歴数: {len(keyword_history)}")
+        print(f"  - 過去5回のキーワード: {past_keywords}")
+        print(f"  - プロンプト用テキスト: {past_keywords_text}")
+        print(f"  - 利用可能分野数: {len(available_fields)}")
+        print(f"  - 除外分野: {recent_categories}")
+        
+        # 利用可能な分野リストをプロンプトに含める
+        available_fields_text = "、".join(available_fields)
+        excluded_fields_text = ', '.join(recent_categories) if recent_categories else "なし"
+        
+        prompt = f"""# 任務
 医師国家試験の出題範囲内で、臨床的に重要かつ最新の医学論文が見つかりやすいキーワードを1つ生成してください。
+
+# 重要な制約（必ず遵守）
+1. 過去に選択された分野: {excluded_fields_text}
+   **これらの分野は選択しないでください。**
+
+2. 過去に生成されたキーワード: {past_keywords_text}
+   **これらのキーワードと類似・重複するものは避けてください。**
+
+# 選択可能な分野
+{available_fields_text}
+
+**上記の分野から1つ選択し、その分野の臨床的に重要なキーワードを英語で生成してください。**
 
 # 選択基準
 1. 医師国家試験の出題範囲内であること
 2. 臨床現場で頻繁に遭遇する疾患・治療法であること
 3. 近年の医学的進歩が著しい分野であること
 4. PubMedで高品質な論文が見つかりやすいこと
-
-# 対象分野（例）
-- 循環器学: 心不全、冠動脈疾患、不整脈
-- 内分泌代謝学: 糖尿病、甲状腺疾患
-- 消化器学: 炎症性腸疾患、肝疾患
-- 神経学: 脳卒中、認知症、パーキンソン病
-- 腫瘍学: がん免疫療法、分子標的治療
-- 感染症学: 抗菌薬耐性、ワクチン、感染症動向、感染症の予防
-- 救急医学: 敗血症、心肺蘇生
-- 精神医学: うつ病、統合失調症
+5. **過去に選択された分野とは異なる分野から選択すること**
+6. **過去に生成されたキーワードとは明確に異なるキーワードを選択すること**
 
 # 出力形式（必須）
 以下のJSON形式で正確に出力してください。他の文字は一切含めないでください：
 
-{
+{{
   "keywords": "検索キーワード（英語、2-4語程度）",
-  "category": "医学分野のカテゴリ",
+  "category": "選択可能な分野から1つ選択",
   "rationale": "選択理由（簡潔に）"
-}
+}}
 """
 
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=config,
-            )
-            
-            if response and response.text:
-                # レスポンステキストから純粋なJSONを抽出
-                response_text = response.text.strip()
+        # プロンプトデバッグ出力（初回のみ）
+        print(f"生成プロンプトデバッグ:")
+        print(f"制約部分:")
+        print(f"  - 除外分野: {excluded_fields_text}")
+        print(f"  - 除外キーワード: {past_keywords_text}")
+        print("="*50)
+        
+        # 同じプロンプトで最大3回リトライ
+        last_error = None
+        for attempt in range(3):
+            try:
+                print(f"キーワード生成試行 {attempt + 1}/3")
                 
-                # JSONブロックを抽出（```json...```がある場合）
-                json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-                if json_match:
-                    response_text = json_match.group(1)
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=config,
+                )
                 
-                # 先頭と末尾の不要なテキストを除去
-                start_brace = response_text.find('{')
-                end_brace = response_text.rfind('}') + 1
-                if start_brace != -1 and end_brace > start_brace:
-                    response_text = response_text[start_brace:end_brace]
+                if not response or not response.text:
+                    raise Exception("キーワード生成で有効な結果が得られませんでした。")
                 
-                keyword_data = json.loads(response_text)
-                if "keywords" in keyword_data:
-                    return {
-                        "keywords": keyword_data["keywords"],
-                        "category": keyword_data.get("category", ""),
-                        "rationale": keyword_data.get("rationale", "")
-                    }
+                # JSONの解析
+                try:
+                    # レスポンステキストから純粋なJSONを抽出
+                    response_text = response.text.strip()
+                    
+                    # 空文字列チェック
+                    if not response_text:
+                        raise Exception("レスポンステキストが空です。")
+                    
+                    # JSONブロックを抽出（```json...```がある場合）
+                    json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+                    if json_match:
+                        response_text = json_match.group(1)
+                    
+                    # 先頭と末尾の不要なテキストを除去
+                    start_brace = response_text.find('{')
+                    end_brace = response_text.rfind('}') + 1
+                    if start_brace != -1 and end_brace > start_brace:
+                        response_text = response_text[start_brace:end_brace]
+                    else:
+                        raise Exception("有効なJSON構造が見つかりませんでした。")
+                    
+                    # 最終的な空文字列チェック
+                    if not response_text or response_text.strip() == "":
+                        raise Exception("JSON抽出後にテキストが空になりました。")
+                    
+                    keyword_data = json.loads(response_text)
+                    if "keywords" in keyword_data:
+                        return {
+                            "keywords": keyword_data["keywords"],
+                            "category": keyword_data.get("category", ""),
+                            "rationale": keyword_data.get("rationale", "")
+                        }
+                    else:
+                        raise Exception("keywordsフィールドが見つかりません")
+                    
+                except (json.JSONDecodeError, Exception) as e:
+                    last_error = e
+                    print(f"試行 {attempt + 1} JSONパースエラー: {e}")
+                    if attempt < 2:  # 最後の試行でなければ続行
+                        continue
+                    else:  # 最後の試行でもエラーの場合
+                        break
+                        
+            except Exception as e:
+                last_error = e
+                print(f"試行 {attempt + 1} API呼び出しエラー: {e}")
+                if attempt < 2:  # 最後の試行でなければ続行
+                    continue
+                else:  # 最後の試行でもエラーの場合
+                    break
         
-        except Exception as e:
-            print(f"JSONプロンプト解析でエラー: {e}")
-            # フォールバック処理に移行
+        # 3回とも失敗した場合、フォールバック処理に移行
+        print(f"3回の試行が失敗、フォールバック処理に移行: {last_error}")
         
-        # フォールバック: 通常のテキスト生成
-        fallback_prompt = """医師国家試験の出題範囲内で、臨床的に重要な医学論文が見つかりやすい英語キーワードを1つ生成してください。
-
-以下の分野から選択し、キーワードのみを出力してください：
-- 循環器学: heart failure, myocardial infarction, atrial fibrillation
-- 内分泌代謝学: diabetes mellitus, thyroid dysfunction, obesity
-- 消化器学: inflammatory bowel disease, hepatitis, gastric cancer
-- 神経学: stroke, dementia, Parkinson disease
-- 腫瘍学: cancer immunotherapy, targeted therapy, lung cancer
-- 感染症学: antimicrobial resistance, vaccination, sepsis
-- 救急医学: cardiopulmonary resuscitation, trauma care
-- 精神医学: depression, schizophrenia, anxiety disorders
-
-キーワードのみを英語で出力してください（説明不要）。"""
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=fallback_prompt
-        )
+        # フォールバック: シンプルなデフォルトキーワード生成
+        print(f"フォールバック処理デバッグ:")
+        print(f"  - 参照中の過去キーワード: {past_keywords}")
+        print(f"  - 利用可能分野: {available_fields}")
         
-        if not response or not response.text:
-            # 最終的なフォールバック：サンプルからランダム選択
-            fallback_keywords = [
-                "heart failure management",
-                "diabetes mellitus type 2",
-                "hypertension treatment", 
-                "atrial fibrillation",
-                "stroke prevention",
-                "sepsis management",
-                "depression treatment",
-                "cancer immunotherapy"
-            ]
-            selected_keyword = random.choice(fallback_keywords)
-            return {
-                "keywords": selected_keyword,
-                "category": "フォールバック選択",
-                "rationale": "API応答の問題により、サンプルから選択されました"
-            }
+        # デフォルトキーワードのシンプルなリスト
+        default_keywords = [
+            ("循環器学", "heart failure management"),
+            ("内分泌代謝学", "diabetes treatment"),
+            ("消化器学", "inflammatory bowel disease"),
+            ("神経学", "stroke prevention"),
+            ("腫瘍学", "cancer immunotherapy"),
+            ("感染症学", "antimicrobial resistance"),
+            ("救急医学", "emergency care"),
+            ("精神医学", "depression treatment")
+        ]
         
-        # テキスト出力をクリーンアップ
-        keywords_text = response.text.strip()
-        # 余分な文字を除去
-        keywords_text = re.sub(r'^[^a-zA-Z]*', '', keywords_text)
-        keywords_text = re.sub(r'[^a-zA-Z\s]*$', '', keywords_text)
+        if available_fields:
+            # 利用可能分野からランダム選択
+            selected_field = random.choice(available_fields)
+            # その分野に対応するデフォルトキーワードを探す
+            field_keywords = [kw for field, kw in default_keywords if field == selected_field]
+            if field_keywords:
+                selected_keyword = field_keywords[0]
+            else:
+                selected_keyword = f"{selected_field.replace('学', '')} treatment"  # 動的生成
+        else:
+            # 全分野から選択
+            selected_field, selected_keyword = random.choice(default_keywords)
         
-        if len(keywords_text) < 3:
-            # フォールバックキーワード
-            keywords_text = "diabetes mellitus treatment"
+        print(f"  - 選択分野: {selected_field}")
+        print(f"  - 選択キーワード: {selected_keyword}")
         
         return {
-            "keywords": keywords_text,
-            "category": "テキスト生成",
-            "rationale": "構造化出力が失敗したため、テキスト生成を使用"
+            "keywords": selected_keyword,
+            "category": selected_field,
+            "rationale": "API応答の問題により、デフォルトキーワードを選択しました"
         }
     
     # 安全なAPI呼び出し
     success, result = safe_api_call(_generate_keywords)
     
     if success:
+        # 履歴にキーワード情報を追加（成功・失敗にかかわらずキーワードが生成された場合）
+        if result.get("keywords"):
+            from modules.utils import save_history
+            from datetime import datetime
+            
+            keyword_info = {
+                "keywords": result.get("keywords", ""),
+                "category": result.get("category", ""),
+                "rationale": result.get("rationale", "")
+            }
+            
+            # 永続化履歴に保存
+            history_data = {
+                "type": "キーワード生成",
+                "date": datetime.now().isoformat(),
+                "keywords": keyword_info["keywords"],
+                "category": keyword_info["category"],
+                "rationale": keyword_info["rationale"]
+            }
+            save_history(history_data)
+            
+            # デバッグ出力
+            print(f"履歴保存デバッグ:")
+            print(f"  - 追加されたキーワード: {keyword_info}")
+            print(f"  - 永続化履歴に保存完了")
+        
         return result
     else:
         return {
@@ -551,6 +820,81 @@ def generate_essay_theme():
             "theme": "",
             "error": f"テーマ生成エラー: {result}"
         }
+
+def get_keyword_history():
+    """
+    過去のキーワード生成履歴を取得します（historyフォルダから）。
+    
+    Returns:
+        list: キーワード履歴のリスト
+    """
+    from modules.utils import load_history
+    
+    # 永続化された履歴とセッション状態の履歴をマージ
+    persistent_history = load_history()
+    keyword_history = []
+    
+    # 永続化履歴からキーワード生成記録を抽出
+    for item in persistent_history:
+        if item.get('type') == 'キーワード生成':
+            keyword_history.append({
+                'keywords': item.get('keywords', ''),
+                'category': item.get('category', ''),
+                'rationale': item.get('rationale', ''),
+                'date': item.get('date', '')
+            })
+    
+    # セッション状態の一時履歴も追加（まだ保存されていないもの）
+    session_history = getattr(st.session_state, 'keyword_history', [])
+    keyword_history.extend(session_history)
+    
+    return keyword_history
+
+def clear_keyword_history():
+    """
+    キーワード生成履歴をクリアします（永続化履歴とセッション履歴の両方）。
+    """
+    import os
+    from modules.utils import HISTORY_DIR
+    
+    # 永続化履歴からキーワード生成タイプのファイルを削除
+    if os.path.exists(HISTORY_DIR):
+        for filename in os.listdir(HISTORY_DIR):
+            if filename.endswith('.json'):
+                filepath = os.path.join(HISTORY_DIR, filename)
+                try:
+                    import json
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if data.get('type') == 'キーワード生成':
+                        os.remove(filepath)
+                        print(f"削除: {filename}")
+                except (json.JSONDecodeError, IOError):
+                    continue
+    
+    # セッション状態の履歴もクリア
+    if 'keyword_history' in st.session_state:
+        st.session_state.keyword_history = []
+
+def get_available_fields():
+    """
+    現在利用可能な医学分野を取得します。
+    
+    Returns:
+        list: 利用可能な分野のリスト
+    """
+    keyword_history = get_keyword_history()
+    
+    if not keyword_history:
+        return MEDICAL_FIELDS.copy()
+    
+    # 過去5回の分野履歴を取得
+    recent_categories = [item.get('category', '') for item in keyword_history[-5:] if item.get('category')]
+    
+    # 利用可能な分野を選択（過去5回と重複しない）
+    available_fields = [field for field in MEDICAL_FIELDS if field not in recent_categories]
+    
+    return available_fields if available_fields else MEDICAL_FIELDS.copy()
 
 def get_sample_keywords():
     """

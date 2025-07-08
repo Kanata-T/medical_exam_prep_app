@@ -1,7 +1,8 @@
 import streamlit as st
 import time
 from datetime import datetime, timedelta
-from modules.paper_finder import find_medical_paper, generate_essay_theme, get_sample_keywords
+from modules.paper_finder import (find_medical_paper, generate_essay_theme, get_sample_keywords,
+                                get_keyword_history, clear_keyword_history, get_available_fields)
 from modules.scorer import score_exam_stream, get_score_distribution
 from modules.utils import (handle_submission, reset_session_state, 
                           check_api_configuration, show_api_setup_guide,
@@ -157,11 +158,11 @@ if st.session_state.exam_completed and st.session_state.exam_results:
     
     with col2:
         if st.button("学習履歴を見る", use_container_width=True):
-            st.switch_page("pages/4_📊_学習履歴.py")
+            st.switch_page("pages/04_学習履歴.py")
     
     with col3:
         if st.button("小論文対策へ", use_container_width=True):
-            st.switch_page("pages/2_✍️_小論文対策.py")
+            st.switch_page("pages/02_小論文.py")
     
     st.stop()
 
@@ -179,24 +180,72 @@ if st.session_state.exam_step == 'setup':
     st.markdown('<div class="task-card">', unsafe_allow_html=True)
     st.markdown("### 論文検索設定")
     
-    # サンプルキーワードとAI生成の説明
-    with st.expander("🤖 AIによる自動キーワード生成について", expanded=False):
-        st.markdown("""
-        **AIによる自動生成の特徴:**
-        - 医師国家試験の出題範囲内から選択
-        - 臨床的に重要度の高い分野を優先
-        - 最新の医学研究動向を反映
-        - PubMedで高品質な論文が見つかりやすいキーワード
-        
-        **参考：従来のサンプルキーワード**
-        """)
-        sample_keywords = get_sample_keywords()
-        cols = st.columns(3)
-        for i, keyword in enumerate(sample_keywords):
-            with cols[i % 3]:
-                if st.button(keyword, key=f"sample_{i}", use_container_width=True):
-                    st.session_state.search_keywords = keyword
-                    st.rerun()
+    # 過去のキーワード履歴とAI生成の説明
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        with st.expander("🤖 AIによる自動キーワード生成について", expanded=False):
+            st.markdown("""
+            **AIによる自動生成の特徴:**
+            - 医師国家試験の出題範囲内から選択
+            - 臨床的に重要度の高い分野を優先
+            - 最新の医学研究動向を反映
+            - PubMedで高品質な論文が見つかりやすいキーワード
+            - **過去5回とは異なる分野から自動選択**
+            - **過去に生成されたキーワードとの重複を回避**
+            
+            **参考：従来のサンプルキーワード**
+            """)
+            sample_keywords = get_sample_keywords()
+            cols = st.columns(2)
+            for i, keyword in enumerate(sample_keywords):
+                with cols[i % 2]:
+                    if st.button(keyword, key=f"sample_{i}", use_container_width=True):
+                        st.session_state.search_keywords = keyword
+                        st.rerun()
+    
+    with col2:
+        with st.expander("📊 過去のキーワード履歴", expanded=False):
+            keyword_history = get_keyword_history()
+            if keyword_history:
+                st.markdown(f"**総履歴数**: {len(keyword_history)}件")
+                st.markdown("**最近生成されたキーワード（最新5件）:**")
+                st.caption("⚠️ 次回の自動生成時、これらのキーワードと類似したものは避けられます")
+                
+                recent_history = keyword_history[-5:]
+                for i, item in enumerate(reversed(recent_history), 1):
+                    category = item.get('category', '不明')
+                    keywords = item.get('keywords', '不明')
+                    rationale = item.get('rationale', '')
+                    st.markdown(f"{i}. **{category}**: `{keywords}`")
+                    if rationale and i <= 3:  # 最新3件のみ理由も表示
+                        st.caption(f"   理由: {rationale}")
+                
+                # 過去のキーワードのリストを表示
+                past_keywords = [item.get('keywords', '') for item in recent_history if item.get('keywords')]
+                if past_keywords:
+                    st.markdown("**回避対象キーワード:**")
+                    st.code(', '.join([f'"{kw}"' for kw in past_keywords]), language=None)
+                
+                st.markdown("---")
+                available_fields = get_available_fields()
+                if available_fields:
+                    st.markdown("**次回利用可能な分野:**")
+                    st.markdown(", ".join(available_fields))
+                else:
+                    st.markdown("**全分野が利用可能**（履歴がリセットされました）")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("履歴をクリア", key="clear_history"):
+                        clear_keyword_history()
+                        st.success("履歴をクリアしました")
+                        st.rerun()
+                with col2:
+                    if st.button("全履歴を表示", key="show_all_history"):
+                        st.json(keyword_history)
+            else:
+                st.info("まだキーワード生成履歴がありません。")
     
     # キーワード入力
     keywords = st.text_input(
@@ -238,7 +287,11 @@ if st.session_state.exam_step == 'setup':
                 
             success_msg = "準備完了！試験を開始します。"
             if not keywords.strip():
-                success_msg += f"\n選択されたキーワード: `{paper_result.get('keywords_used', '')}`"
+                selected_keywords = paper_result.get('keywords_used', '')
+                selected_category = paper_result.get('category', '')
+                if selected_category:
+                    success_msg += f"\n**選択された分野**: {selected_category}"
+                success_msg += f"\n**キーワード**: `{selected_keywords}`"
             st.success(success_msg)
             time.sleep(1)
             st.rerun()
