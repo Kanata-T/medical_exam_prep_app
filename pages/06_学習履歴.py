@@ -277,11 +277,15 @@ def load_and_process_history():
     for item in history_data:
         date = pd.to_datetime(item['date'])
         item_type = item.get('type', '不明')
+        duration_seconds = item.get('duration_seconds', 0)
+        duration_display = item.get('duration_display', '未記録')
         
         df_data.append({
             'date': date,
             'type': item_type,
-            'has_scores': bool(item.get('scores'))
+            'has_scores': bool(item.get('scores')),
+            'duration_seconds': duration_seconds,
+            'duration_display': duration_display
         })
         
         if isinstance(item.get('scores'), dict):
@@ -290,7 +294,9 @@ def load_and_process_history():
                     'date': date,
                     'type': item_type,
                     'category': category,
-                    'score': score
+                    'score': score,
+                    'duration_seconds': duration_seconds,
+                    'duration_display': duration_display
                 })
     
     df_base = pd.DataFrame(df_data)
@@ -433,12 +439,22 @@ with col3:
         """, unsafe_allow_html=True)
 
 with col4:
+    # 平均所要時間の計算
+    filtered_with_duration = filtered_base[filtered_base['duration_seconds'] > 0]
+    if not filtered_with_duration.empty:
+        avg_duration_seconds = filtered_with_duration['duration_seconds'].mean()
+        avg_duration_minutes = int(avg_duration_seconds // 60)
+        avg_duration_seconds_remainder = int(avg_duration_seconds % 60)
+        duration_text = f"{avg_duration_minutes}分{avg_duration_seconds_remainder}秒"
+    else:
+        duration_text = "未記録"
+    
     st.markdown("""
     <div class="stat-card info">
-        <p class="stat-value">{}</p>
-        <p class="stat-label">学習日数</p>
+        <p class="stat-value" style="font-size: 1.5rem;">{}</p>
+        <p class="stat-label">平均所要時間</p>
     </div>
-    """.format(days_active), unsafe_allow_html=True)
+    """.format(duration_text), unsafe_allow_html=True)
 
 # 詳細分析タブ
 st.markdown('<div class="section-header">📊 詳細分析</div>', unsafe_allow_html=True)
@@ -504,6 +520,7 @@ with tab2:
         st.info("📊 スコア付きのデータがないため、カテゴリ別分析は表示できません。")
 
 with tab3:
+    # 曜日別練習回数
     filtered_base_copy = filtered_base.copy()
     filtered_base_copy['weekday'] = filtered_base_copy['date'].dt.day_name()
     weekday_counts = filtered_base_copy['weekday'].value_counts()
@@ -520,6 +537,32 @@ with tab3:
         font=dict(family="Arial, sans-serif")
     )
     st.plotly_chart(fig_weekday, use_container_width=True)
+    
+    # 所要時間の推移
+    filtered_with_duration = filtered_base[filtered_base['duration_seconds'] > 0]
+    if not filtered_with_duration.empty and len(filtered_with_duration) > 1:
+        # 分単位に変換
+        filtered_with_duration_copy = filtered_with_duration.copy()
+        filtered_with_duration_copy['duration_minutes'] = filtered_with_duration_copy['duration_seconds'] / 60
+        
+        fig_duration = px.line(
+            filtered_with_duration_copy,
+            x='date',
+            y='duration_minutes',
+            color='type',
+            title='所要時間の推移',
+            labels={'duration_minutes': '所要時間（分）', 'date': '日付'},
+            color_discrete_sequence=px.colors.qualitative.Set2
+        )
+        fig_duration.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Arial, sans-serif")
+        )
+        fig_duration.update_traces(line=dict(width=3))
+        st.plotly_chart(fig_duration, use_container_width=True)
+    else:
+        st.info("📊 所要時間が記録されているデータが2件以上ある場合に所要時間推移が表示されます。")
 
 # 履歴詳細
 st.markdown('<div class="section-header">📜 練習履歴詳細</div>', unsafe_allow_html=True)
@@ -559,6 +602,7 @@ for item in reversed(history): # 新しい順に
     date_str = item_date.strftime('%Y/%m/%d')
     time_str = item_date.strftime('%H:%M')
     item_type = item.get('type', '不明')
+    duration_display = item.get('duration_display', '未記録')
     
     # タイムラインアイテムの作成
     timeline_item_html = f'''
@@ -567,7 +611,12 @@ for item in reversed(history): # 新しい順に
             <h3 class="timeline-title">{item_type}
                 <span class="timeline-badge badge-{item_type}">{item_type}</span>
             </h3>
-            <div class="timeline-date">{date_str} {time_str}</div>
+            <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
+                <div class="timeline-date">{date_str} {time_str}</div>
+                <div style="font-size: 0.8rem; color: #6b7280; background: #f9fafb; padding: 0.125rem 0.5rem; border-radius: 12px;">
+                    ⏱️ {duration_display}
+                </div>
+            </div>
         </div>
     '''
     

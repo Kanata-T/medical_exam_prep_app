@@ -106,6 +106,7 @@ session_vars = {
     'exam_style_enabled': False,  # 過去問スタイル出題の有効化
     'exam_format_type': 'letter_translation_opinion',  # 出題形式
     'exam_formatted_data': None,  # 過去問スタイルに変換されたデータ
+    'reading_start_time': 0,  # 読解練習開始時間
 }
 
 # セッション復元を試行
@@ -374,6 +375,7 @@ if st.session_state.reading_step == 'setup':
                 st.session_state.paper_data = paper_result
                 st.session_state.reading_step = 'reading'
                 st.session_state.reading_keywords = paper_result.get('keywords_used', keywords)
+                st.session_state.reading_start_time = time.time()  # 開始時間を記録
                 
             success_msg = "準備完了！読解練習を開始します。"
             if not keywords.strip():
@@ -725,6 +727,13 @@ elif st.session_state.reading_step == 'scoring':
         # 履歴保存（過去問スタイル対応）
         scores = extract_scores(full_feedback)
         
+        # 所要時間の計算
+        completion_time = time.time()
+        start_time = st.session_state.get('reading_start_time', completion_time)
+        duration_seconds = completion_time - start_time
+        duration_minutes = int(duration_seconds // 60)
+        duration_seconds_remainder = int(duration_seconds % 60)
+        
         if submitted.get('exam_style', False):
             exam_type = "過去問スタイル英語読解"
             format_names = {
@@ -739,6 +748,8 @@ elif st.session_state.reading_step == 'scoring':
         history_data = {
             "type": exam_type,
             "date": datetime.now().isoformat(),
+            "duration_seconds": duration_seconds,
+            "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
             "inputs": submitted,
             "feedback": full_feedback,
             "scores": scores

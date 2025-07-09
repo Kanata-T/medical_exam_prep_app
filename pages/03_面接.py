@@ -288,8 +288,17 @@ def run_single_practice():
         st.session_state.single_practice_vars['results'] = feedback
         st.session_state.single_practice_vars['completed'] = True
         # 履歴保存
+        # 所要時間の計算
+        completion_time = time.time()
+        start_time = vars_dict.get('start_time', completion_time)
+        duration_seconds = completion_time - start_time
+        duration_minutes = int(duration_seconds // 60)
+        duration_seconds_remainder = int(duration_seconds % 60)
+        
         history_data = {
             "type": "面接対策(単発)", "date": datetime.now().isoformat(),
+            "duration_seconds": duration_seconds,
+            "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
             "inputs": {"question": vars_dict.get('question', ''), "answer": vars_dict.get('user_answer', '')},
             "feedback": feedback, "scores": extract_scores(feedback)
         }
@@ -318,6 +327,7 @@ def run_session_practice():
     if state['state'] == 'not_started':
         if st.button("模擬面接を開始する", type="primary", use_container_width=True):
             state['state'] = 'ongoing'
+            state['session_start_time'] = time.time()
             state['is_responding'] = True
             st.rerun()
 
@@ -342,8 +352,18 @@ def run_session_practice():
             if "---" in full_response and "【総合フィードバック】" in full_response:
                 state['state'] = 'completed'
                 feedback_part = full_response.split("---", 1)[1]
+                
+                # 所要時間の計算
+                completion_time = time.time()
+                start_time = state.get('session_start_time', completion_time)
+                duration_seconds = completion_time - start_time
+                duration_minutes = int(duration_seconds // 60)
+                duration_seconds_remainder = int(duration_seconds % 60)
+                
                 history_data = {
                     "type": "面接対策(セッション)", "date": datetime.now().isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
                     "inputs": {"conversation": state['chat_history']},
                     "feedback": feedback_part, "scores": extract_scores(feedback_part)
                 }

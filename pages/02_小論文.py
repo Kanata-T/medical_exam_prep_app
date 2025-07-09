@@ -301,9 +301,19 @@ elif st.session_state.essay_step == 'scoring':
             
             # 履歴保存
             scores = extract_scores(full_feedback)
+            
+            # 所要時間の計算
+            completion_time = time.time()
+            start_time = st.session_state.get('start_time', completion_time)
+            duration_seconds = completion_time - start_time
+            duration_minutes = int(duration_seconds // 60)
+            duration_seconds_remainder = int(duration_seconds % 60)
+            
             history_data = {
                 "type": "小論文対策",
                 "date": datetime.now().isoformat(),
+                "duration_seconds": duration_seconds,
+                "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
                 "inputs": {
                     "theme": submitted['theme'],
                     "memo": submitted['memo'],

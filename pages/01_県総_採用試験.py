@@ -949,6 +949,12 @@ elif st.session_state.exam_step == 'scoring':
         # 履歴保存（過去問スタイル対応）
         scores = extract_scores(full_feedback)
         
+        # 所要時間の計算
+        completion_time = time.time()
+        duration_seconds = completion_time - st.session_state.start_time
+        duration_minutes = int(duration_seconds // 60)
+        duration_seconds_remainder = int(duration_seconds % 60)
+        
         if submitted.get('exam_style', False):
             exam_type = "過去問スタイル採用試験"
             format_names = {
@@ -963,6 +969,8 @@ elif st.session_state.exam_step == 'scoring':
         history_data = {
             "type": exam_type,
             "date": datetime.now().isoformat(),
+            "duration_seconds": duration_seconds,
+            "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
             "inputs": {
                 **submitted,
                 "essay_theme": st.session_state.essay_theme
