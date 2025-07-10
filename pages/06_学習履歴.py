@@ -382,8 +382,9 @@ try:
     
     with col2:
         if st.button("🔄 履歴更新", help="履歴データを最新の状態に更新"):
+            # キャッシュクリアのみ行い、自動的に再読み込みされるのを待つ
             st.cache_data.clear()
-            st.rerun()
+            st.success("💫 履歴データを更新しました！")
     
     with col3:
         # 履歴エクスポートボタン
@@ -405,7 +406,7 @@ except ImportError:
 st.markdown("---")
 
 # データの読み込み（Supabase対応）
-@st.cache_data(ttl=600)  # キャッシュ時間を延長して重複リクエストを削減
+@st.cache_data(ttl=600, show_spinner=False)  # スピナーを無効化
 def load_and_process_history():
     """全練習タイプの履歴をSupabaseまたはローカルから読み込み"""
     try:
@@ -632,7 +633,7 @@ with st.sidebar:
         end_date = today
 
     available_types = df_base['練習タイプ'].unique().tolist()
-    selected_types = st.multiselect("📚 練習タイプ", available_types, default=available_types)
+    selected_types = st.multiselect("📚 練習タイプ", available_types, default=available_types, key="practice_type_filter")
     
     if not df_scores.empty:
         score_min = int(df_scores['score'].min())
@@ -663,7 +664,7 @@ else:
 tab1, tab2, tab3, tab4 = st.tabs(["📈 統計サマリー", "📊 詳細分析", "📋 履歴一覧", "🔧 エラー確認"])
 
 with tab1:
-    # メイン画面
+    # 統計サマリータブ
     if filtered_base.empty:
         st.warning("選択されたフィルターに一致するデータがありません。")
     else:
@@ -715,180 +716,181 @@ with tab1:
                 )
                 fig_weekday.update_layout(showlegend=False, height=400)
                 st.plotly_chart(fig_weekday, use_container_width=True)
-total_practices = len(filtered_base)
-days_active = filtered_base['日付'].dt.date.nunique()
 
-# 統計カードをStreamlitのcolumnsで実装
-col1, col2, col3, col4 = st.columns(4)
+        total_practices = len(filtered_base)
+        days_active = filtered_base['日付'].dt.date.nunique()
 
-with col1:
-    st.markdown("""
-    <div class="stat-card primary">
-        <p class="stat-value">{}</p>
-        <p class="stat-label">総練習回数</p>
-    </div>
-    """.format(total_practices), unsafe_allow_html=True)
+        # 統計カードをStreamlitのcolumnsで実装
+        col1, col2, col3, col4 = st.columns(4)
 
-with col2:
-    if not filtered_scores.empty:
-        avg_score = filtered_scores['score'].mean()
-        st.markdown("""
-        <div class="stat-card success">
-            <p class="stat-value">{:.1f}</p>
-            <p class="stat-label">平均スコア</p>
-        </div>
-        """.format(avg_score), unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="stat-card success">
-            <p class="stat-value">N/A</p>
-            <p class="stat-label">平均スコア</p>
-        </div>
-        """, unsafe_allow_html=True)
+        with col1:
+            st.markdown("""
+            <div class="stat-card primary">
+                <p class="stat-value">{}</p>
+                <p class="stat-label">総練習回数</p>
+            </div>
+            """.format(total_practices), unsafe_allow_html=True)
 
-with col3:
-    if not filtered_scores.empty:
-        best_score = filtered_scores['score'].max()
-        st.markdown("""
-        <div class="stat-card warning">
-            <p class="stat-value">{}</p>
-            <p class="stat-label">最高スコア</p>
-        </div>
-        """.format(best_score), unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="stat-card warning">
-            <p class="stat-value">N/A</p>
-            <p class="stat-label">最高スコア</p>
-        </div>
-        """, unsafe_allow_html=True)
+        with col2:
+            if not filtered_scores.empty:
+                avg_score = filtered_scores['score'].mean()
+                st.markdown("""
+                <div class="stat-card success">
+                    <p class="stat-value">{:.1f}</p>
+                    <p class="stat-label">平均スコア</p>
+                </div>
+                """.format(avg_score), unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="stat-card success">
+                    <p class="stat-value">N/A</p>
+                    <p class="stat-label">平均スコア</p>
+                </div>
+                """, unsafe_allow_html=True)
 
-with col4:
-    # 平均所要時間の計算
-    filtered_with_duration = filtered_base[filtered_base['duration_seconds'] > 0]
-    if not filtered_with_duration.empty:
-        avg_duration_seconds = filtered_with_duration['duration_seconds'].mean()
-        avg_duration_minutes = int(avg_duration_seconds // 60)
-        avg_duration_seconds_remainder = int(avg_duration_seconds % 60)
-        duration_text = f"{avg_duration_minutes}分{avg_duration_seconds_remainder}秒"
-    else:
-        duration_text = "未記録"
-    
-    st.markdown("""
-    <div class="stat-card info">
-        <p class="stat-value" style="font-size: 1.5rem;">{}</p>
-        <p class="stat-label">平均所要時間</p>
-    </div>
-    """.format(duration_text), unsafe_allow_html=True)
+        with col3:
+            if not filtered_scores.empty:
+                best_score = filtered_scores['score'].max()
+                st.markdown("""
+                <div class="stat-card warning">
+                    <p class="stat-value">{}</p>
+                    <p class="stat-label">最高スコア</p>
+                </div>
+                """.format(best_score), unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="stat-card warning">
+                    <p class="stat-value">N/A</p>
+                    <p class="stat-label">最高スコア</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with col4:
+            # 平均所要時間の計算
+            filtered_with_duration = filtered_base[filtered_base['duration_seconds'] > 0]
+            if not filtered_with_duration.empty:
+                avg_duration_seconds = filtered_with_duration['duration_seconds'].mean()
+                avg_duration_minutes = int(avg_duration_seconds // 60)
+                avg_duration_seconds_remainder = int(avg_duration_seconds % 60)
+                duration_text = f"{avg_duration_minutes}分{avg_duration_seconds_remainder}秒"
+            else:
+                duration_text = "未記録"
+            
+            st.markdown("""
+            <div class="stat-card info">
+                <p class="stat-value" style="font-size: 1.5rem;">{}</p>
+                <p class="stat-label">平均所要時間</p>
+            </div>
+            """.format(duration_text), unsafe_allow_html=True)
 
 with tab2:
     # 詳細分析タブ
     st.markdown('<div class="section-header">📊 詳細分析</div>', unsafe_allow_html=True)
     subtab1, subtab2, subtab3 = st.tabs(["📈 スコア推移", "🎯 カテゴリ別分析", "📅 学習パターン"])
 
-with tab1:
-    if not filtered_scores.empty and len(filtered_scores) > 1:
-        fig = px.line(
-            filtered_scores, 
-            x='date', 
-            y='score', 
-            color='category',
-            title='スコア推移',
-            hover_data=['type'],
-            color_discrete_sequence=px.colors.qualitative.Set2
-        )
-        fig.update_layout(
-            xaxis_title='日付', 
-            yaxis_title='スコア', 
-            yaxis=dict(range=[0, 10.5]),
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(family="Arial, sans-serif")
-        )
-        fig.update_traces(line=dict(width=3))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("📊 スコア付きのデータが2件以上ある場合にスコア推移が表示されます。")
-
-with tab2:
-    if not filtered_scores.empty:
-        category_stats = filtered_scores.groupby(['type', 'category']).agg(
-            mean_score=('score', 'mean'),
-            max_score=('score', 'max'),
-            count=('score', 'count')
-        ).round(1).reset_index()
-
-        if len(category_stats) > 2:
-            categories = category_stats['category'].unique()
-            avg_scores_by_cat = category_stats.groupby('category')['mean_score'].mean()
-            
-            fig_radar = go.Figure()
-            fig_radar.add_trace(go.Scatterpolar(
-                r=avg_scores_by_cat.values,
-                theta=avg_scores_by_cat.index,
-                fill='toself',
-                name='平均スコア',
-                line_color='rgb(102, 126, 234)',
-                fillcolor='rgba(102, 126, 234, 0.3)'
-            ))
-            fig_radar.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 10])),
-                title="カテゴリ別平均スコア",
+    with subtab1:
+        if not filtered_scores.empty and len(filtered_scores) > 1:
+            fig = px.line(
+                filtered_scores, 
+                x='date', 
+                y='score', 
+                color='category',
+                title='スコア推移',
+                hover_data=['type'],
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            fig.update_layout(
+                xaxis_title='日付', 
+                yaxis_title='スコア', 
+                yaxis=dict(range=[0, 10.5]),
                 plot_bgcolor='rgba(0,0,0,0)',
                 paper_bgcolor='rgba(0,0,0,0)',
                 font=dict(family="Arial, sans-serif")
             )
-            st.plotly_chart(fig_radar, use_container_width=True)
-        
-        st.markdown("**📋 カテゴリ別統計**")
-        st.dataframe(category_stats, use_container_width=True, hide_index=True)
-    else:
-        st.info("📊 スコア付きのデータがないため、カテゴリ別分析は表示できません。")
+            fig.update_traces(line=dict(width=3))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("📊 スコア付きのデータが2件以上ある場合にスコア推移が表示されます。")
 
-with tab3:
-    # 曜日別練習回数
-    filtered_base_copy = filtered_base.copy()
-    filtered_base_copy['weekday'] = filtered_base_copy['日付'].dt.day_name()
-    weekday_counts = filtered_base_copy['weekday'].value_counts()
-    
-    fig_weekday = px.bar(
-        weekday_counts,
-        title="曜日別練習回数",
-        labels={'index': '曜日', 'value': '練習回数'},
-        color_discrete_sequence=['#667eea']
-    )
-    fig_weekday.update_layout(
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        font=dict(family="Arial, sans-serif")
-    )
-    st.plotly_chart(fig_weekday, use_container_width=True)
-    
-    # 所要時間の推移
-    filtered_with_duration = filtered_base[filtered_base['duration_seconds'] > 0]
-    if not filtered_with_duration.empty and len(filtered_with_duration) > 1:
-        # 分単位に変換
-        filtered_with_duration_copy = filtered_with_duration.copy()
-        filtered_with_duration_copy['duration_minutes'] = filtered_with_duration_copy['duration_seconds'] / 60
+    with subtab2:
+        if not filtered_scores.empty:
+            category_stats = filtered_scores.groupby(['type', 'category']).agg(
+                mean_score=('score', 'mean'),
+                max_score=('score', 'max'),
+                count=('score', 'count')
+            ).round(1).reset_index()
+
+            if len(category_stats) > 2:
+                categories = category_stats['category'].unique()
+                avg_scores_by_cat = category_stats.groupby('category')['mean_score'].mean()
+                
+                fig_radar = go.Figure()
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=avg_scores_by_cat.values,
+                    theta=avg_scores_by_cat.index,
+                    fill='toself',
+                    name='平均スコア',
+                    line_color='rgb(102, 126, 234)',
+                    fillcolor='rgba(102, 126, 234, 0.3)'
+                ))
+                fig_radar.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 10])),
+                    title="カテゴリ別平均スコア",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(family="Arial, sans-serif")
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+            
+            st.markdown("**📋 カテゴリ別統計**")
+            st.dataframe(category_stats, use_container_width=True, hide_index=True)
+        else:
+            st.info("📊 スコア付きのデータがないため、カテゴリ別分析は表示できません。")
+
+    with subtab3:
+        # 曜日別練習回数
+        filtered_base_copy = filtered_base.copy()
+        filtered_base_copy['weekday'] = filtered_base_copy['日付'].dt.day_name()
+        weekday_counts = filtered_base_copy['weekday'].value_counts()
         
-        fig_duration = px.line(
-            filtered_with_duration_copy,
-            x='日付',
-            y='duration_minutes',
-            color='練習タイプ',
-            title='所要時間の推移',
-            labels={'duration_minutes': '所要時間（分）', '日付': '日付'},
-            color_discrete_sequence=px.colors.qualitative.Set2
+        fig_weekday = px.bar(
+            weekday_counts,
+            title="曜日別練習回数",
+            labels={'index': '曜日', 'value': '練習回数'},
+            color_discrete_sequence=['#667eea']
         )
-        fig_duration.update_layout(
+        fig_weekday.update_layout(
             plot_bgcolor='rgba(0,0,0,0)',
             paper_bgcolor='rgba(0,0,0,0)',
             font=dict(family="Arial, sans-serif")
         )
-        fig_duration.update_traces(line=dict(width=3))
-        st.plotly_chart(fig_duration, use_container_width=True)
-    else:
-        st.info("📊 所要時間が記録されているデータが2件以上ある場合に所要時間推移が表示されます。")
+        st.plotly_chart(fig_weekday, use_container_width=True)
+        
+        # 所要時間の推移
+        filtered_with_duration = filtered_base[filtered_base['duration_seconds'] > 0]
+        if not filtered_with_duration.empty and len(filtered_with_duration) > 1:
+            # 分単位に変換
+            filtered_with_duration_copy = filtered_with_duration.copy()
+            filtered_with_duration_copy['duration_minutes'] = filtered_with_duration_copy['duration_seconds'] / 60
+            
+            fig_duration = px.line(
+                filtered_with_duration_copy,
+                x='日付',
+                y='duration_minutes',
+                color='練習タイプ',
+                title='所要時間の推移',
+                labels={'duration_minutes': '所要時間（分）', '日付': '日付'},
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            fig_duration.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(family="Arial, sans-serif")
+            )
+            fig_duration.update_traces(line=dict(width=3))
+            st.plotly_chart(fig_duration, use_container_width=True)
+        else:
+            st.info("📊 所要時間が記録されているデータが2件以上ある場合に所要時間推移が表示されます。")
 
 with tab3:
     # 履歴詳細タブ
@@ -1132,17 +1134,24 @@ with tab4:
     if database_available:
         st.subheader("🔧 採点エラーの確認と再実行")
         
+        # セッション状態に再採点完了フラグを追加
+        if 'rescoring_completed' not in st.session_state:
+            st.session_state.rescoring_completed = False
+        
         try:
             # エラーのある履歴を取得
             error_records = db_manager.has_scoring_errors()
             
             if not error_records:
                 st.success("✅ 採点エラーのある履歴は見つかりませんでした。")
+                st.session_state.rescoring_completed = False  # リセット
             else:
                 st.warning(f"⚠️ {len(error_records)}件の採点エラーが見つかりました。")
                 
                 # 一括再採点ボタン
-                if st.button("🔄 すべてのエラーを一括再採点", type="primary"):
+                if st.button("🔄 すべてのエラーを一括再採点", type="primary", disabled=st.session_state.rescoring_completed):
+                    st.session_state.rescoring_completed = True
+                    
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
@@ -1158,10 +1167,19 @@ with tab4:
                             st.error(f"記録 {i+1} の再採点に失敗: {e}")
                     
                     st.success(f"✅ {success_count}/{len(error_records)}件の再採点が完了しました。")
-                    st.rerun()
+                    # st.rerun() を削除して無限ループを防止
+                    # 代わりにキャッシュをクリアして次回読み込み時に最新データを取得
+                    st.cache_data.clear()
                 
-                # エラー履歴を個別表示
-                for i, error_record in enumerate(error_records):
+                # 再採点完了後のリセットボタン
+                if st.session_state.rescoring_completed:
+                    if st.button("🔄 再度エラーチェック", type="secondary"):
+                        st.session_state.rescoring_completed = False
+                        st.cache_data.clear()
+                        st.rerun()
+                
+                # エラー履歴を個別表示（最大10件まで）
+                for i, error_record in enumerate(error_records[:10]):
                     with st.expander(f"エラー記録 {i+1}: {error_record['practice_type']} ({error_record['date'][:10]})"):
                         st.write("**練習タイプ:**", error_record['practice_type'])
                         st.write("**日時:**", error_record['date'])
@@ -1188,12 +1206,17 @@ with tab4:
                                 
                                 if success:
                                     st.success("✅ 再採点が完了しました！")
-                                    st.rerun()
+                                    st.cache_data.clear()
+                                    # 個別再採点では無限ループを避けるためrerunを削除
                                 else:
                                     st.error("❌ 再採点に失敗しました。")
                                     
                             except Exception as e:
                                 st.error(f"再採点中にエラーが発生しました: {e}")
+                
+                # 10件を超える場合の表示
+                if len(error_records) > 10:
+                    st.info(f"表示しているのは最初の10件です。残り{len(error_records) - 10}件のエラーがあります。")
         
         except Exception as e:
             st.error(f"エラー確認機能でエラーが発生しました: {e}")

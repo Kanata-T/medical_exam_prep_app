@@ -88,7 +88,7 @@ if not api_ok:
     st.stop()
 
 # --- 履歴データの処理 ---
-@st.cache_data(ttl=300)  # キャッシュ時間を適切に設定
+@st.cache_data(ttl=300, show_spinner=False)  # スピナーを無効化
 def load_and_process_free_writing_history():
     """自由記述の履歴データを読み込んで処理"""
     try:
@@ -120,8 +120,9 @@ def _load_free_writing_history_local():
         st.error(f"履歴データの読み込みエラー: {e}")
         return []
 
+@st.cache_data(ttl=300, show_spinner=False)  # キャッシュ化して重複計算を防止
 def get_themes_with_stats():
-    """テーマ別の統計情報を取得"""
+    """テーマ別の統計情報を取得（履歴データを一度だけ取得）"""
     history = load_and_process_free_writing_history()
     if not history:
         return {}
@@ -161,6 +162,45 @@ def get_themes_with_stats():
     
     return themes_stats
 
+# ローカル履歴用のテーマ関連関数（重複リクエストを防ぐため）
+def get_recent_themes_local(limit: int = 5) -> list:
+    """自由記述の最近のテーマをローカル履歴から取得（重複リクエスト防止）"""
+    history = load_and_process_free_writing_history()
+    recent_themes = []
+    
+    for item in history:
+        theme = item.get('inputs', {}).get('theme')
+        if theme and theme not in recent_themes:
+            recent_themes.append(theme)
+            if len(recent_themes) >= limit:
+                break
+    
+    return recent_themes
+
+def get_theme_history_local(theme: str) -> list:
+    """特定テーマの履歴をローカル履歴から取得（重複リクエスト防止）"""
+    history = load_and_process_free_writing_history()
+    theme_history = []
+    
+    for item in history:
+        if item.get('inputs', {}).get('theme') == theme and item.get('scores'):
+            theme_data = {
+                'date': item.get('date'),
+                'scores': item.get('scores'),
+                'feedback': item.get('feedback', ''),
+                'answer': item.get('inputs', {}).get('answer', '')
+            }
+            theme_history.append(theme_data)
+    
+    # 日付順でソート（新しい順）
+    theme_history.sort(key=lambda x: x['date'], reverse=True)
+    return theme_history
+
+def is_theme_recently_used_local(theme: str, recent_limit: int = 3) -> bool:
+    """テーマが最近使用されたかローカル履歴からチェック（重複リクエスト防止）"""
+    recent_themes = get_recent_themes_local(recent_limit)
+    return theme in recent_themes
+
 # --- UIコンポーネント ---
 def render_theme_selection():
     """テーマ選択画面を表示"""
@@ -187,7 +227,7 @@ def render_theme_selection():
         """)
 
     # 最近のテーマを取得（過去5回分を回避するため）
-    recent_themes = get_recent_themes("自由記述", 5)
+    recent_themes = get_recent_themes_local(5)
     
     with st.container(border=True):
         st.subheader("1. テーマを選択または入力してください")
@@ -202,7 +242,7 @@ def render_theme_selection():
             if st.button("🎲 AIが医学部採用試験形式でランダム出題", use_container_width=True, type="primary"):
                 with st.spinner("医学部採用試験形式の問題を生成中..."):
                     # 過去5回のテーマを取得して回避
-                    recent_themes = get_recent_themes("自由記述", 5)
+                    recent_themes = get_recent_themes_local(5)
                     
                     # 最大5回試行して、過去5回と重複しないテーマを生成
                     max_attempts = 5
@@ -287,9 +327,9 @@ def render_theme_selection():
                     for theme in themes:
                         if theme in default_themes:  # 存在確認
                             with cols[col_idx % num_cols]:
-                                # 最近使用したテーマかどうかの表示
-                                recently_used = is_theme_recently_used("自由記述", theme, 5)
-                                theme_history = get_theme_history("自由記述", theme)
+                                # 最近使用したテーマかどうかの表示（ローカル関数を使用）
+                                recently_used = is_theme_recently_used_local(theme, 5)
+                                theme_history = get_theme_history_local(theme)
                                 
                                 # ボタンの表示テキストとスタイル
                                 button_text = theme
@@ -320,9 +360,9 @@ def render_theme_selection():
         custom_theme = st.text_input("（例：間質性肺炎、脳梗塞）", key="custom_theme_input")
         
         if custom_theme:
-            # カスタムテーマの履歴チェック
-            custom_recently_used = is_theme_recently_used("自由記述", custom_theme, 5)
-            custom_history = get_theme_history("自由記述", custom_theme)
+            # カスタムテーマの履歴チェック（ローカル関数を使用）
+            custom_recently_used = is_theme_recently_used_local(custom_theme, 5)
+            custom_history = get_theme_history_local(custom_theme)
             
             warning_text = ""
             if custom_recently_used:
@@ -493,9 +533,9 @@ def render_completed_screen():
     with st.container(border=True):
         st.markdown(s['feedback'])
 
-    # 進歩比較の表示
+    # 進歩比較の表示（ローカル関数を使用）
     if s.get('theme'):
-        theme_history = get_theme_history("自由記述", s['theme'])
+        theme_history = get_theme_history_local(s['theme'])
         if theme_history:
             render_progress_comparison(s['theme'], theme_history)
 
@@ -506,9 +546,9 @@ def render_completed_screen():
         st.markdown("---")
         st.markdown("### 🚀 次の練習におすすめ")
         
-        # 最近使用していないテーマを推奨
+        # 最近使用していないテーマを推奨（ローカル関数を使用）
         default_themes = get_default_themes()
-        recent_themes = get_recent_themes("自由記述", 5)
+        recent_themes = get_recent_themes_local(5)
         recommended_themes = [theme for theme in default_themes if theme not in recent_themes]
         
         if recommended_themes:
@@ -573,8 +613,9 @@ def render_history_overview():
     
     with col2:
         if st.button("🔄 履歴更新", help="履歴データを最新の状態に更新します"):
+            # キャッシュクリアのみ行い、自動再読み込みを待つ
             st.cache_data.clear()
-            st.rerun()
+            st.success("💫 履歴データを更新しました！")
     
     with col3:
         # 履歴エクスポートボタン
@@ -591,6 +632,7 @@ def render_history_overview():
         except ImportError:
             pass
     
+    # 履歴とテーマ統計を一度に取得（重複を防止）
     history = load_and_process_free_writing_history()
     if not history:
         st.info("📝 まだ自由記述の履歴がありません。新しい練習タブで練習を始めてください。")
@@ -640,7 +682,8 @@ def render_theme_history():
     selected_theme = st.selectbox(
         "📋 テーマを選択",
         theme_options,
-        format_func=lambda x: f"{x} ({themes_stats[x]['count']}回練習, 平均スコア: {themes_stats[x]['avg_score']:.1f})"
+        format_func=lambda x: f"{x} ({themes_stats[x]['count']}回練習, 平均スコア: {themes_stats[x]['avg_score']:.1f})",
+        key="theme_history_selector"
     )
     
     if selected_theme:
@@ -693,7 +736,7 @@ def render_theme_detail(theme, stats):
             st.error(f"グラフの表示中にエラーが発生しました: {e}")
             st.info("スコア推移グラフを表示できませんでした。")
     
-    # 詳細履歴
+    # 詳細履歴（再度の履歴取得を避けるため、すでに取得済みのデータを使用）
     st.markdown("#### 📝 練習履歴詳細")
     history = load_and_process_free_writing_history()
     theme_history = [item for item in history if item.get('inputs', {}).get('theme') == theme]
