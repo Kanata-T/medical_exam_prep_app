@@ -520,91 +520,94 @@ MEDICAL_FIELDS = [
     "眼科学", "耳鼻咽喉科学", "産婦人科学", "小児科学", "麻酔科学", "放射線科学"
 ]
 
-def generate_medical_keywords():
+def generate_medical_keywords(purpose="general"):
     """
-    医師国家試験範囲内の医学キーワードをAIが自動生成する。
-    過去5回とは異なる分野から選択される。
+    医学論文検索用のキーワードをAIで生成します。
+    
+    Args:
+        purpose (str): キーワードの用途 ("general", "paper_search", "free_writing")
     
     Returns:
         dict: {
             "keywords": str,
             "category": str,
+            "rationale": str,
             "error": str (optional)
         }
     """
-    
-    # 履歴から過去5回の分野を取得
-    keyword_history = get_keyword_history()
-    recent_categories = [item.get('category', '') for item in keyword_history[-5:] if item.get('category')]
-    
-    # 利用可能な分野を選択（過去5回と重複しない）
-    available_fields = [field for field in MEDICAL_FIELDS if field not in recent_categories]
-    
-    # 利用可能な分野がない場合は全分野を利用可能にする
-    if not available_fields:
-        available_fields = MEDICAL_FIELDS.copy()
+    # 新しい命名規則に対応した練習タイプ名を決定
+    if purpose == "paper_search":
+        practice_type = "キーワード生成（論文検索用）"
+    elif purpose == "free_writing":
+        practice_type = "キーワード生成（自由記述用）"
+    else:
+        practice_type = "キーワード生成"
     
     def _generate_keywords():
-        """内部のキーワード生成関数（リトライ機能付きフォールバック）"""
+        """内部のキーワード生成関数"""
+        
+        # 過去のキーワードと分野の取得
+        past_keywords = [item.get('keywords', '') for item in get_keyword_history()[-5:] if item.get('keywords')]
+        available_fields = get_available_fields()
+        
+        print(f"キーワード生成デバッグ情報:")
+        print(f"  - 練習タイプ: {practice_type}")
+        print(f"  - 用途: {purpose}")
+        print(f"  - 過去のキーワード: {past_keywords}")
+        print(f"  - 利用可能分野: {available_fields}")
+        
         client = genai.Client()
         
-        config = GenerateContentConfig()
-        
-        # 過去5回のキーワード履歴を取得（デバッグ付き）
-        past_keywords = [item.get('keywords', '') for item in keyword_history[-5:] if item.get('keywords')]
-        past_keywords_text = ', '.join([f'"{kw}"' for kw in past_keywords]) if past_keywords else "なし"
-        
-        # デバッグ出力
-        print(f"履歴取得デバッグ:")
-        print(f"  - 総履歴数: {len(keyword_history)}")
-        print(f"  - 過去5回のキーワード: {past_keywords}")
-        print(f"  - プロンプト用テキスト: {past_keywords_text}")
-        print(f"  - 利用可能分野数: {len(available_fields)}")
-        print(f"  - 除外分野: {recent_categories}")
-        
-        # 利用可能な分野リストをプロンプトに含める
-        available_fields_text = "、".join(available_fields)
-        excluded_fields_text = ', '.join(recent_categories) if recent_categories else "なし"
-        
-        prompt = f"""# 任務
-医師国家試験の出題範囲内で、臨床的に重要かつ最新の医学論文が見つかりやすいキーワードを1つ生成してください。
-
-# 重要な制約（必ず遵守）
-1. 過去に選択された分野: {excluded_fields_text}
-   **これらの分野は選択しないでください。**
-
-2. 過去に生成されたキーワード: {past_keywords_text}
-   **これらのキーワードと類似・重複するものは避けてください。**
-
-# 選択可能な分野
-{available_fields_text}
-
-**上記の分野から1つ選択し、その分野の臨床的に重要なキーワードを英語で生成してください。**
-
-# 選択基準
-1. 医師国家試験の出題範囲内であること
-2. 臨床現場で頻繁に遭遇する疾患・治療法であること
-3. 近年の医学的進歩が著しい分野であること
-4. PubMedで高品質な論文が見つかりやすいこと
-5. **過去に選択された分野とは異なる分野から選択すること**
-6. **過去に生成されたキーワードとは明確に異なるキーワードを選択すること**
-
-# 出力形式（必須）
-以下のJSON形式で正確に出力してください。他の文字は一切含めないでください：
-
-{{
-  "keywords": "検索キーワード（英語、2-4語程度）",
-  "category": "選択可能な分野から1つ選択",
-  "rationale": "選択理由（簡潔に）"
-}}
+        # 用途に応じたプロンプトの調整
+        if purpose == "free_writing":
+            purpose_instruction = """
+この生成されたキーワードは医学部採用試験の自由記述問題のテーマとして使用されます。
+受験者が知識を基に論理的に記述できるような、適度な難易度のキーワードを選択してください。
 """
+        elif purpose == "paper_search":
+            purpose_instruction = """
+この生成されたキーワードは医学論文の検索に使用されます。
+最新の研究動向を反映し、学術的に価値のある論文が見つかりやすいキーワードを選択してください。
+"""
+        else:
+            purpose_instruction = """
+この生成されたキーワードは一般的な医学学習に使用されます。
+幅広い学習に適した、バランスの取れたキーワードを選択してください。
+"""
+        
+        # 構造化されたプロンプト
+        prompt = f"""# 役割
+あなたは医学研究と教育の専門家です。{purpose_instruction}
 
-        # プロンプトデバッグ出力（初回のみ）
-        print(f"生成プロンプトデバッグ:")
-        print(f"制約部分:")
-        print(f"  - 除外分野: {excluded_fields_text}")
-        print(f"  - 除外キーワード: {past_keywords_text}")
-        print("="*50)
+# 医学分野一覧
+{', '.join(MEDICAL_FIELDS)}
+
+# 生成条件
+- 過去に使用されたキーワード（重複回避）: {', '.join(past_keywords) if past_keywords else 'なし'}
+- 利用可能分野: {', '.join(available_fields) if available_fields else '全分野'}
+
+# 指示
+1. 利用可能分野から1つを選択
+2. その分野で注目される疾患・治療・技術のキーワードを英語で生成
+3. キーワードは具体的で検索に適した形式にする（例: "diabetes management", "cancer immunotherapy"）
+4. 過去のキーワードと重複しないように注意
+
+# 出力形式（JSON）
+{{
+  "keywords": "生成されたキーワード（英語）",
+  "category": "選択した医学分野",
+  "rationale": "このキーワードを選んだ理由（100字程度の日本語）"
+}}
+
+# 要求
+上記の指示に従い、JSON形式でキーワードを生成してください。"""
+
+        # 生成設定
+        config = genai.GenerationConfig(
+            temperature=0.8,
+            max_output_tokens=300,
+            response_mime_type="application/json"
+        )
         
         # 同じプロンプトで最大3回リトライ
         last_error = None
@@ -652,7 +655,8 @@ def generate_medical_keywords():
                         return {
                             "keywords": keyword_data["keywords"],
                             "category": keyword_data.get("category", ""),
-                            "rationale": keyword_data.get("rationale", "")
+                            "rationale": keyword_data.get("rationale", ""),
+                            "purpose": purpose  # 用途情報を追加
                         }
                     else:
                         raise Exception("keywordsフィールドが見つかりません")
@@ -712,7 +716,8 @@ def generate_medical_keywords():
         return {
             "keywords": selected_keyword,
             "category": selected_field,
-            "rationale": "API応答の問題により、デフォルトキーワードを選択しました"
+            "rationale": "API応答の問題により、デフォルトキーワードを選択しました",
+            "purpose": purpose
         }
     
     # 安全なAPI呼び出し
@@ -727,21 +732,24 @@ def generate_medical_keywords():
             keyword_info = {
                 "keywords": result.get("keywords", ""),
                 "category": result.get("category", ""),
-                "rationale": result.get("rationale", "")
+                "rationale": result.get("rationale", ""),
+                "purpose": result.get("purpose", purpose)
             }
             
-            # 永続化履歴に保存
+            # 永続化履歴に保存（新しい命名規則を使用）
             history_data = {
-                "type": "キーワード生成",
+                "type": practice_type,
                 "date": datetime.now().isoformat(),
                 "keywords": keyword_info["keywords"],
                 "category": keyword_info["category"],
-                "rationale": keyword_info["rationale"]
+                "rationale": keyword_info["rationale"],
+                "purpose": keyword_info["purpose"]
             }
             save_history(history_data)
             
             # デバッグ出力
             print(f"履歴保存デバッグ:")
+            print(f"  - 練習タイプ: {practice_type}")
             print(f"  - 追加されたキーワード: {keyword_info}")
             print(f"  - 永続化履歴に保存完了")
         
@@ -834,14 +842,18 @@ def get_keyword_history():
     persistent_history = load_history()
     keyword_history = []
     
-    # 永続化履歴からキーワード生成記録を抽出
+    # 永続化履歴からキーワード生成記録を抽出（新しい命名規則対応）
     for item in persistent_history:
-        if item.get('type') == 'キーワード生成':
+        practice_type = item.get('type', '')
+        # キーワード生成の全バリエーションに対応
+        if (practice_type == 'キーワード生成' or 
+            practice_type.startswith('キーワード生成')):
             keyword_history.append({
                 'keywords': item.get('keywords', ''),
                 'category': item.get('category', ''),
                 'rationale': item.get('rationale', ''),
-                'date': item.get('date', '')
+                'date': item.get('date', ''),
+                'purpose': item.get('purpose', 'general')  # 用途情報も含める
             })
     
     # セッション状態の一時履歴も追加（まだ保存されていないもの）
@@ -857,7 +869,7 @@ def clear_keyword_history():
     import os
     from modules.utils import HISTORY_DIR
     
-    # 永続化履歴からキーワード生成タイプのファイルを削除
+    # 永続化履歴からキーワード生成タイプのファイルを削除（新しい命名規則対応）
     if os.path.exists(HISTORY_DIR):
         for filename in os.listdir(HISTORY_DIR):
             if filename.endswith('.json'):
@@ -866,7 +878,10 @@ def clear_keyword_history():
                     import json
                     with open(filepath, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    if data.get('type') == 'キーワード生成':
+                    practice_type = data.get('type', '')
+                    # キーワード生成の全バリエーションを削除対象に
+                    if (practice_type == 'キーワード生成' or 
+                        practice_type.startswith('キーワード生成')):
                         os.remove(filepath)
                         print(f"削除: {filename}")
                 except (json.JSONDecodeError, IOError):
@@ -923,7 +938,7 @@ PAST_EXAM_PATTERNS = [
         "topic": "皮膚膿瘍抗菌薬治療",
         "content": {
             "paper_summary": """2016年3月に皮膚膿瘍に関して以下のような論文が出ました。
-皮膚膿瘍による救急受診が、メチシリン耐性黄色ブドウ球菌（MRSA）の出現に伴い増加しており、救急部において、単純性膿瘍に対し切開排膿を受ける外来患者を対象に、トリメトプリム・スルファメトキサゾールがプラセボに対して優越性が認められるかどうかを検討し、主要転帰は膿瘍の臨床的治癒とし、7～14日の時点で評価した。皮膚膿瘍の切開排膿を受けた患者にトリメトプリム・スルファメトキサゾールを投与することで、プラセボと比較して高い治癒率が得られた。""",
+皮膿瘍による救急受診が、メチシリン耐性黄色ブドウ球菌（MRSA）の出現に伴い増加しており、救急部において、単純性膿瘍に対し切開排膿を受ける外来患者を対象に、トリメトプリム・スルファメトキサゾールがプラセボに対して優越性が認められるかどうかを検討し、主要転帰は膿瘍の臨床的治癒とし、7～14日の時点で評価した。皮膿瘍の切開排膿を受けた患者にトリメトプリム・スルファメトキサゾールを投与することで、プラセボと比較して高い治癒率が得られた。""",
             "comment": """The study by Talan et al. supports the use of antibiotics as an adjunctive treatment for uncomplicated skin abscesses, but this recommendation runs contrary to current efforts to reduce antibiotic use in the face of the rising threat of antimicrobial resistance. We note that up to a quarter of the swabs processed in the study showed either no growth or coagulase-negative staphylococcal growth. Did the authors find a difference in response rate stratified according to these culture results? In addition, since high adherence to antibiotic therapy was achieved in only 64.7% of study participants, was a subanalysis performed for those who received courses that were shorter than prescribed? When antibiotics are used as an adjunct to drainage, the majority of bacteria are probably removed during surgery, and recent studies have shown that adequate source control can shorten the standard course of antibiotics without reducing clinical efficacy. Therefore, it is likely that when antibiotics are used as an adjunctive treatment, a shorter course would provide equivalent clinical benefit and would also reduce the risks of adverse effects, limit total antibiotic consumption, and decrease the selective pressure toward the development of resistance."""
         },
         "task1": "（１）和訳して、（２）そのコメントについて、皆さんの意見を書きなさい。"

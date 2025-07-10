@@ -1,10 +1,11 @@
 import streamlit as st
-from google import genai
+import google.genai as genai
 from google.genai import types
 from google.api_core import retry
 import os
 import logging
 import json
+from modules.utils import score_with_retry_stream
 
 # ロガー設定
 logging.basicConfig(level=logging.INFO)
@@ -101,14 +102,26 @@ def generate_interview_question(category: str = "all") -> dict:
         return {"error": str(e)}
 
 def score_interview_answer_stream(question: str, answer: str):
-    """単発の面接回答を評価し、結果をストリーミングで返す"""
-    prompt = get_interview_scoring_prompt(question, answer)
+    """
+    単発の面接回答を評価し、結果をストリーミングで返す
+    リトライ機能付きで503エラーなどに対応。
+    """
+    # リトライ機能付きの採点関数を定義
+    def _score_interview_internal():
+        prompt = get_interview_scoring_prompt(question, answer)
+        try:
+            client = _get_gemini_client()
+            stream = client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt)
+            return stream
+        except Exception as e:
+            raise e
+    
+    # リトライ機能付きでストリーミング実行
     try:
-        client = _get_gemini_client()
-        stream = client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt)
-        return stream
+        yield from score_with_retry_stream(_score_interview_internal)
     except Exception as e:
-        return _create_error_stream(e)
+        # 最終的にエラーが発生した場合
+        yield from _create_error_stream(e)
 
 def get_interview_tips() -> dict:
     """面接対策のヒントを返す"""
@@ -117,17 +130,18 @@ def get_interview_tips() -> dict:
         "回答の構成（STARメソッド）": ["**S (Situation):** 状況 - いつ、どこでの出来事か", "**T (Task):** 課題 - どのような目標や課題があったか", "**A (Action):** 行動 - その課題に対して具体的に何をしたか", "**R (Result):** 結果 - 行動の結果どうなったか、何を学んだか"]
     }
 
-def conduct_interview_session_stream(history: list[dict]):
-    """模擬面接セッションを実行し、面接官の次の発言をストリーミングで返す"""
+def get_interview_session_prompt(chat_history: list) -> str:
+    """面接セッション用のプロンプトを生成する"""
+    
     system_instruction = """
 あなたは、プロの採用面接官です。これから初期研修採用試験において、応募者との模擬面接セッションを行います。
 以下の指示と会話履歴に基づいて、面接官として自然で適切な発言を生成してください。
 
 【面接の進行フロー】
-1.  **開始**: 会話履歴が空の場合、まず応募者に挨拶し、簡単な自己紹介（例：「本日はよろしくお願いします。面接官のAIです。」）をした後、最初の質問を投げかけてください。最初の質問は自己紹介や志望動機など、基本的なものから始めてください。
-2.  **質疑応答**: 応募者の回答に対して、1〜2回深掘りの質問をしてください。深掘りが終わったら、次のテーマの質問に移ってください。「では次に、〇〇についてお伺いします。」のように、話題の転換を明確にすると自然です。
-3.  **セッションの終了**: 合計で約10分程度を目安とし、全体で4〜5つの質問と回答のやり取りが完了したら、面接を終了する旨を伝えてください。（例：「以上で面接は終了です。本日はありがとうございました。」）
-4.  **総合評価**: 面接終了の挨拶の後、必ず"---"という区切り線を入れ、その下に【総合フィードバック】という見出しで、セッション全体を通しての応募者の回答に対する詳細な評価を記述してください。評価の観点は、「論理性」「具体性」「自己理解」「コミュニケーション能力」「熱意」などを含め、良かった点と改善点を具体的に指摘してください。
+1. **開始**: 会話履歴が空の場合、まず応募者に挨拶し、簡単な自己紹介（例：「本日はよろしくお願いします。面接官のAIです。」）をした後、最初の質問を投げかけてください。最初の質問は自己紹介や志望動機など、基本的なものから始めてください。
+2. **質疑応答**: 応募者の回答に対して、1〜2回深掘りの質問をしてください。深掘りが終わったら、次のテーマの質問に移ってください。「では次に、〇〇についてお伺いします。」のように、話題の転換を明確にすると自然です。
+3. **セッションの終了**: 合計で約10分程度を目安とし、全体で4〜5つの質問と回答のやり取りが完了したら、面接を終了する旨を伝えてください。（例：「以上で面接は終了です。本日はありがとうございました。」）
+4. **総合評価**: 面接終了の挨拶の後、必ず"---"という区切り線を入れ、その下に【総合フィードバック】という見出しで、セッション全体を通しての応募者の回答に対する詳細な評価を記述してください。評価の観点は、「論理性」「具体性」「自己理解」「コミュニケーション能力」「熱意」などを含め、良かった点と改善点を具体的に指摘してください。
 
 【発言のルール】
 - あなたの発言は、一度の応答で「挨拶→最初の質問」や「次の質問」や「終了の挨拶→総合評価」のように、1つのフェーズのみとしてください。複数のフェーズを一度に返さないでください。
@@ -135,21 +149,43 @@ def conduct_interview_session_stream(history: list[dict]):
 - 厳しすぎず、丁寧かつプロフェッショナルな口調を維持してください。
 """
     
+    # 会話履歴を整理
+    history_text = ""
+    if chat_history:
+        for i, item in enumerate(chat_history):
+            role = "面接官" if item["role"] == "ai" else "応募者"
+            history_text += f"\n{role}: {item['content']}"
+    else:
+        history_text = "\n（まだ会話は始まっていません。面接を開始してください。）"
+    
+    prompt = f"""{system_instruction}
+
+【これまでの会話履歴】{history_text}
+
+【指示】
+上記の会話履歴を踏まえて、面接官として次に発言すべき内容を生成してください。
+"""
+    
+    return prompt
+
+def conduct_interview_session_stream(chat_history: list):
+    """
+    面接セッションを継続し、結果をストリーミングで返す
+    リトライ機能付きで503エラーなどに対応。
+    """
+    # リトライ機能付きの面接セッション関数を定義
+    def _conduct_session_internal():
+        prompt = get_interview_session_prompt(chat_history)
+        try:
+            client = _get_gemini_client()
+            stream = client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt)
+            return stream
+        except Exception as e:
+            raise e
+    
+    # リトライ機能付きでストリーミング実行
     try:
-        client = _get_gemini_client()
-        chat = client.chats.create(
-            model=GEMINI_MODEL,
-            config=types.GenerateContentConfig(system_instruction=system_instruction)
-        )
-        
-        # 履歴を再構築
-        for item in history[:-1]: # 最後のユーザーメッセージは含めない
-            chat.send_message(item["content"])
-
-        # 最後のユーザーメッセージを送信してストリーム応答を取得
-        last_message = history[-1]["content"] if history else "面接を開始してください。"
-        stream = chat.send_message_stream(last_message)
-        return stream
-
+        yield from score_with_retry_stream(_conduct_session_internal)
     except Exception as e:
-        return _create_error_stream(e)
+        # 最終的にエラーが発生した場合
+        yield from _create_error_stream(e)

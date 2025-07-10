@@ -10,11 +10,89 @@ import logging
 # ロガー設定
 logger = logging.getLogger(__name__)
 
+class PracticeTypeManager:
+    """練習タイプの管理と分類を行うクラス"""
+    
+    # 練習タイプの階層的分類
+    PRACTICE_TYPE_CATEGORIES = {
+        "採用試験系": {
+            "標準採用試験": ["採用試験"],
+            "過去問スタイル採用試験": [
+                "過去問スタイル採用試験",
+                "過去問スタイル採用試験 - Letter形式（翻訳 + 意見）",
+                "過去問スタイル採用試験 - 論文コメント形式（コメント翻訳 + 意見）"
+            ]
+        },
+        "英語読解系": {
+            "標準英語読解": ["英語読解"],
+            "過去問スタイル英語読解": [
+                "過去問スタイル英語読解",
+                "過去問スタイル英語読解 - Letter形式（翻訳 + 意見）",
+                "過去問スタイル英語読解 - 論文コメント形式（コメント翻訳 + 意見）"
+            ]
+        },
+        "記述系": {
+            "小論文対策": ["小論文対策"],
+            "自由記述": ["医学部採用試験 自由記述"]
+        },
+        "面接系": {
+            "単発面接": ["面接対策(単発)"],
+            "セッション面接": ["面接対策(セッション)"]
+        },
+        "論文研究系": {
+            "キーワード生成": [
+                "キーワード生成",
+                "キーワード生成（論文検索用）",
+                "キーワード生成（自由記述用）"
+            ],
+            "論文検索": ["論文検索"]
+        }
+    }
+    
+    @classmethod
+    def get_category_for_type(cls, practice_type: str) -> tuple[str, str]:
+        """練習タイプからカテゴリと種別を取得"""
+        for category, subcategories in cls.PRACTICE_TYPE_CATEGORIES.items():
+            for subcategory, types in subcategories.items():
+                if practice_type in types or any(practice_type.startswith(t) for t in types):
+                    return category, subcategory
+        return "その他", "不明"
+    
+    @classmethod
+    def is_exam_style_type(cls, practice_type: str) -> bool:
+        """過去問スタイルかどうかを判定"""
+        return "過去問スタイル" in practice_type
+    
+    @classmethod
+    def is_keyword_generation_type(cls, practice_type: str) -> bool:
+        """キーワード生成タイプかどうかを判定"""
+        return practice_type.startswith("キーワード生成")
+    
+    @classmethod
+    def is_paper_search_type(cls, practice_type: str) -> bool:
+        """論文検索タイプかどうかを判定"""
+        return practice_type == "論文検索"
+    
+    @classmethod
+    def get_display_name(cls, practice_type: str) -> str:
+        """表示用の短縮名を取得"""
+        display_names = {
+            "過去問スタイル採用試験 - Letter形式（翻訳 + 意見）": "過去問採用試験（Letter）",
+            "過去問スタイル採用試験 - 論文コメント形式（コメント翻訳 + 意見）": "過去問採用試験（Comment）",
+            "過去問スタイル英語読解 - Letter形式（翻訳 + 意見）": "過去問英語読解（Letter）",
+            "過去問スタイル英語読解 - 論文コメント形式（コメント翻訳 + 意見）": "過去問英語読解（Comment）",
+            "キーワード生成（論文検索用）": "キーワード生成（論文用）",
+            "キーワード生成（自由記述用）": "キーワード生成（記述用）",
+            "医学部採用試験 自由記述": "自由記述"
+        }
+        return display_names.get(practice_type, practice_type)
+
 class DatabaseManager:
     """Supabaseを使った履歴データベース管理クラス"""
     
     def __init__(self):
         self.client: Optional[Client] = None
+        self.practice_type_manager = PracticeTypeManager()
         self._initialize_client()
     
     def _initialize_client(self) -> None:
@@ -71,21 +149,22 @@ class DatabaseManager:
             logger.error(f"Failed to update last active time: {e}")
     
     def _extract_inputs_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """練習タイプに応じてinputsデータを抽出"""
+        """練習タイプに応じてinputsデータを抽出（改良版）"""
         practice_type = data.get('type', '')
         
-        # キーワード生成の場合の特別処理
-        if practice_type == 'キーワード生成':
+        # キーワード生成系の場合の特別処理
+        if self.practice_type_manager.is_keyword_generation_type(practice_type):
             inputs_data = {
                 'keywords': data.get('keywords', ''),
                 'category': data.get('category', ''),
-                'rationale': data.get('rationale', '')
+                'rationale': data.get('rationale', ''),
+                'purpose': self._extract_keyword_purpose(practice_type)  # 用途を追加
             }
             logger.info(f"Keyword generation inputs: {inputs_data}")
             return inputs_data
         
         # 論文検索の場合の特別処理
-        elif practice_type == '論文検索':
+        elif self.practice_type_manager.is_paper_search_type(practice_type):
             inputs_data = {
                 'search_keywords': data.get('search_keywords', ''),
                 'paper_title': data.get('paper_title', ''),
@@ -97,67 +176,91 @@ class DatabaseManager:
             logger.info(f"Paper search inputs: {list(inputs_data.keys())}")
             return inputs_data
         
-        # 通常の練習の場合（採用試験、小論文、面接、自由記述、英語読解）
+        # 過去問スタイル系の場合の特別処理
+        elif self.practice_type_manager.is_exam_style_type(practice_type):
+            inputs_data = data.get('inputs', {})
+            # 過去問スタイルの場合は形式情報も保存
+            inputs_data['exam_style_variant'] = self._extract_exam_style_variant(practice_type)
+            logger.info(f"Exam style inputs for {practice_type}: {list(inputs_data.keys())}")
+            return inputs_data
+        
+        # 通常の練習の場合
         else:
             inputs_data = data.get('inputs', {})
             logger.info(f"Regular practice inputs for {practice_type}: {list(inputs_data.keys()) if isinstance(inputs_data, dict) else 'Not a dict'}")
             return inputs_data
     
+    def _extract_keyword_purpose(self, practice_type: str) -> str:
+        """キーワード生成の用途を抽出"""
+        if "論文検索用" in practice_type:
+            return "paper_search"
+        elif "自由記述用" in practice_type:
+            return "free_writing"
+        else:
+            return "general"
+    
+    def _extract_exam_style_variant(self, practice_type: str) -> str:
+        """過去問スタイルのバリエーションを抽出"""
+        if "Letter形式" in practice_type:
+            return "letter_format"
+        elif "論文コメント形式" in practice_type:
+            return "comment_format"
+        else:
+            return "standard"
+
     def _restore_data_structure(self, practice_type: str, practice_date: str, inputs: Dict[str, Any], 
                                feedback: str, scores: Dict[str, Any], duration_seconds: int, 
                                duration_display: str) -> Dict[str, Any]:
-        """練習タイプに応じてデータ構造を復元"""
+        """練習タイプに応じてデータ構造を復元（改良版）"""
+        
+        # 共通データ構造
+        base_result = {
+            'type': practice_type,
+            'date': practice_date,
+            'feedback': feedback,
+            'scores': scores,
+            'duration_seconds': duration_seconds,
+            'duration_display': duration_display,
+            'category': self.practice_type_manager.get_category_for_type(practice_type)[0],
+            'subcategory': self.practice_type_manager.get_category_for_type(practice_type)[1],
+            'display_name': self.practice_type_manager.get_display_name(practice_type)
+        }
         
         # キーワード生成の場合の特別処理
-        if practice_type == 'キーワード生成':
+        if self.practice_type_manager.is_keyword_generation_type(practice_type):
             # inputsから直接キーとして展開
-            result = {
-                'type': practice_type,
-                'date': practice_date,
+            base_result.update({
                 'keywords': inputs.get('keywords', ''),
                 'category': inputs.get('category', ''),
                 'rationale': inputs.get('rationale', ''),
-                'feedback': feedback,
-                'scores': scores,
-                'duration_seconds': duration_seconds,
-                'duration_display': duration_display
-            }
-            logger.debug(f"Restored keyword generation data: {list(result.keys())}")
-            return result
+                'purpose': inputs.get('purpose', 'general')
+            })
+            logger.debug(f"Restored keyword generation data: {list(base_result.keys())}")
+            return base_result
         
         # 論文検索の場合の特別処理  
-        elif practice_type == '論文検索':
+        elif self.practice_type_manager.is_paper_search_type(practice_type):
             # inputsから直接キーとして展開
-            result = {
-                'type': practice_type,
-                'date': practice_date,
+            base_result.update({
                 'search_keywords': inputs.get('search_keywords', ''),
                 'paper_title': inputs.get('paper_title', ''),
                 'paper_abstract': inputs.get('paper_abstract', ''),
                 'study_type': inputs.get('study_type', ''),
                 'relevance_score': inputs.get('relevance_score', ''),
-                'citations': inputs.get('citations', []),
-                'feedback': feedback,
-                'scores': scores,
-                'duration_seconds': duration_seconds,
-                'duration_display': duration_display
-            }
-            logger.debug(f"Restored paper search data: {list(result.keys())}")
-            return result
+                'citations': inputs.get('citations', [])
+            })
+            logger.debug(f"Restored paper search data: {list(base_result.keys())}")
+            return base_result
         
-        # 通常の練習の場合（採用試験、小論文、面接、自由記述、英語読解）
+        # 通常の練習の場合（過去問スタイルを含む）
         else:
-            result = {
-                'type': practice_type,
-                'date': practice_date,
-                'inputs': inputs,
-                'feedback': feedback,
-                'scores': scores,
-                'duration_seconds': duration_seconds,
-                'duration_display': duration_display
-            }
+            base_result['inputs'] = inputs
+            # 過去問スタイルの場合は追加情報を設定
+            if self.practice_type_manager.is_exam_style_type(practice_type):
+                base_result['exam_style_variant'] = inputs.get('exam_style_variant', 'standard')
+            
             logger.debug(f"Restored regular practice data for {practice_type}: inputs keys = {list(inputs.keys()) if isinstance(inputs, dict) else 'Not a dict'}")
-            return result
+            return base_result
     
     def save_practice_history(self, data: Dict[str, Any]) -> bool:
         """練習履歴をデータベースに保存"""
@@ -262,7 +365,7 @@ class DatabaseManager:
         if not self.is_available():
             logger.warning("Database not available. Loading from session state only.")
             return self._load_from_session_state(practice_type, limit)
-        
+
         try:
             session_id = self.get_session_id()
             
@@ -320,7 +423,115 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error loading practice history from database: {e}")
             return self._load_from_session_state(practice_type, limit)
-    
+
+    def load_all_practice_history_batch(self, practice_types: Optional[List[str]] = None, limit: int = 1000) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        複数の練習タイプの履歴を一括で効率的に取得します。
+        重複するAPIリクエストを削減し、パフォーマンスを向上させます。
+        
+        Args:
+            practice_types: 取得したい練習タイプのリスト。Noneの場合は全てを取得
+            limit: 取得する最大レコード数
+            
+        Returns:
+            練習タイプをキーとした辞書。各値は履歴のリスト
+        """
+        if not self.is_available():
+            logger.warning("Database not available. Loading from session state only.")
+            return self._load_batch_from_session_state(practice_types, limit)
+
+        try:
+            session_id = self.get_session_id()
+            
+            # 一度のクエリで全履歴を取得
+            query = self.client.table('practice_history').select('*').eq('session_id', session_id)
+            
+            if practice_types:
+                # IN句を使用して複数の練習タイプを一度に取得
+                query = query.in_('practice_type', practice_types)
+            
+            result = query.order('practice_date', desc=True).limit(limit).execute()
+            
+            # 練習タイプ別に分類
+            history_by_type = {}
+            if practice_types:
+                # 指定された練習タイプで初期化
+                for practice_type in practice_types:
+                    history_by_type[practice_type] = []
+            
+            if result.data:
+                for item in result.data:
+                    try:
+                        practice_type = item['practice_type']
+                        
+                        # JSON解析を安全に実行
+                        inputs = {}
+                        if item['inputs']:
+                            try:
+                                inputs = json.loads(item['inputs'])
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse inputs JSON: {e}")
+                        
+                        scores = {}
+                        if item['scores']:
+                            try:
+                                scores = json.loads(item['scores'])
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse scores JSON: {e}")
+                        
+                        # 練習タイプに応じてデータ構造を復元
+                        converted_item = self._restore_data_structure(
+                            practice_type,
+                            item['practice_date'],
+                            inputs,
+                            item['feedback'],
+                            scores,
+                            item['duration_seconds'],
+                            item['duration_display']
+                        )
+                        
+                        # 練習タイプ別に分類して追加
+                        if practice_type not in history_by_type:
+                            history_by_type[practice_type] = []
+                        history_by_type[practice_type].append(converted_item)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to convert database record: {e}")
+                        continue
+                
+                logger.info(f"Successfully batch loaded {len(result.data)} records for {len(history_by_type)} practice types")
+                return history_by_type
+            else:
+                return history_by_type if practice_types else {}
+                
+        except Exception as e:
+            logger.error(f"Error batch loading practice history from database: {e}")
+            return self._load_batch_from_session_state(practice_types, limit)
+
+    def _load_batch_from_session_state(self, practice_types: Optional[List[str]] = None, limit: int = 1000) -> Dict[str, List[Dict[str, Any]]]:
+        """フォールバック: セッション状態から一括読み込み"""
+        if 'offline_history' not in st.session_state:
+            return {} if not practice_types else {pt: [] for pt in practice_types}
+        
+        history = st.session_state.offline_history
+        history_by_type = {}
+        
+        if practice_types:
+            for practice_type in practice_types:
+                history_by_type[practice_type] = [
+                    item for item in history 
+                    if item.get('type') == practice_type
+                ][:limit]
+        else:
+            # 全てを練習タイプ別に分類
+            for item in history:
+                practice_type = item.get('type', '不明')
+                if practice_type not in history_by_type:
+                    history_by_type[practice_type] = []
+                history_by_type[practice_type].append(item)
+        
+        return history_by_type
+
     def _load_from_session_state(self, practice_type: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """フォールバック: セッション状態から読み込み"""
         if 'offline_history' not in st.session_state:
@@ -332,6 +543,58 @@ class DatabaseManager:
             history = [item for item in history if item.get('type') == practice_type]
         
         return history[:limit]
+
+    def has_scoring_errors(self, practice_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        採点エラーが発生した履歴を特定します。
+        
+        Args:
+            practice_type: 特定の練習タイプに絞る場合は指定
+            
+        Returns:
+            エラーが発生した履歴のリスト
+        """
+        try:
+            history = self.load_practice_history(practice_type, limit=200)
+            error_history = []
+            
+            for item in history:
+                feedback = item.get('feedback', '')
+                scores = item.get('scores', {})
+                
+                # エラーの兆候をチェック
+                has_error = (
+                    # フィードバックにエラーメッセージが含まれている
+                    'システムエラー' in feedback or
+                    '503 UNAVAILABLE' in feedback or
+                    'UNAVAILABLE' in feedback or
+                    'overloaded' in feedback or
+                    # スコアが空または無効
+                    not scores or
+                    (isinstance(scores, dict) and len(scores) == 0) or
+                    # フィードバックが短すぎる（エラーメッセージの可能性）
+                    (feedback and len(feedback.strip()) < 100 and 'エラー' in feedback)
+                )
+                
+                if has_error:
+                    # 再採点に必要な情報があるかチェック
+                    inputs = item.get('inputs', {})
+                    if inputs and isinstance(inputs, dict):
+                        error_history.append({
+                            'record_id': item.get('id'),  # データベースのレコードID（もしあれば）
+                            'practice_type': item.get('type'),
+                            'date': item.get('date'),
+                            'inputs': inputs,
+                            'error_feedback': feedback,
+                            'original_item': item
+                        })
+            
+            logger.info(f"Found {len(error_history)} records with scoring errors")
+            return error_history
+            
+        except Exception as e:
+            logger.error(f"Error checking for scoring errors: {e}")
+            return []
     
     def get_recent_themes(self, practice_type: str, limit: int = 5) -> List[str]:
         """最近のテーマを取得"""
@@ -394,6 +657,98 @@ class DatabaseManager:
                 status['database_records'] = 'Unknown'
         
         return status
+
+    def analyze_practice_types(self) -> Dict[str, Any]:
+        """
+        データベースに実際に保存されている練習タイプを分析し、
+        統計情報と分類結果を返します。
+        """
+        if not self.is_available():
+            logger.warning("Database not available. Cannot analyze practice types.")
+            return {"error": "Database not available"}
+        
+        try:
+            session_id = self.get_session_id()
+            
+            # 全ての練習タイプと件数を取得
+            result = self.client.table('practice_history').select('practice_type').eq('session_id', session_id).execute()
+            
+            if not result.data:
+                return {"total_records": 0, "practice_types": {}, "categories": {}}
+            
+            # 練習タイプ別の集計
+            type_counts = {}
+            for record in result.data:
+                practice_type = record['practice_type']
+                type_counts[practice_type] = type_counts.get(practice_type, 0) + 1
+            
+            # カテゴリ別の集計
+            category_analysis = {}
+            unrecognized_types = []
+            
+            for practice_type, count in type_counts.items():
+                category, subcategory = self.practice_type_manager.get_category_for_type(practice_type)
+                
+                if category == "その他":
+                    unrecognized_types.append(practice_type)
+                
+                if category not in category_analysis:
+                    category_analysis[category] = {"total": 0, "subcategories": {}}
+                
+                category_analysis[category]["total"] += count
+                
+                if subcategory not in category_analysis[category]["subcategories"]:
+                    category_analysis[category]["subcategories"][subcategory] = {"total": 0, "types": {}}
+                
+                category_analysis[category]["subcategories"][subcategory]["total"] += count
+                category_analysis[category]["subcategories"][subcategory]["types"][practice_type] = count
+            
+            analysis_result = {
+                "total_records": len(result.data),
+                "unique_practice_types": len(type_counts),
+                "practice_types": type_counts,
+                "categories": category_analysis,
+                "unrecognized_types": unrecognized_types,
+                "display_names": {
+                    practice_type: self.practice_type_manager.get_display_name(practice_type)
+                    for practice_type in type_counts.keys()
+                }
+            }
+            
+            logger.info(f"Practice type analysis completed: {analysis_result['unique_practice_types']} unique types found")
+            return analysis_result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing practice types: {e}")
+            return {"error": str(e)}
+
+    def get_all_unique_practice_types(self) -> List[str]:
+        """
+        データベースに存在する全ての一意な練習タイプを取得します。
+        動的に練習タイプリストを生成する際に使用します。
+        """
+        if not self.is_available():
+            return []
+        
+        try:
+            session_id = self.get_session_id()
+            
+            # SQLで一意な練習タイプを取得
+            result = self.client.table('practice_history')\
+                .select('practice_type')\
+                .eq('session_id', session_id)\
+                .execute()
+            
+            if result.data:
+                unique_types = list(set(record['practice_type'] for record in result.data))
+                logger.info(f"Found {len(unique_types)} unique practice types in database")
+                return sorted(unique_types)
+            else:
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error getting unique practice types: {e}")
+            return []
 
 # グローバルインスタンス
 db_manager = DatabaseManager() 

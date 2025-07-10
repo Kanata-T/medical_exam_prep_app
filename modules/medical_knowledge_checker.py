@@ -1,9 +1,10 @@
 import streamlit as st
-from google import genai
+import google.genai as genai
 from google.genai import types
 from google.api_core import retry
 import os
 import logging
+from modules.utils import safe_api_call, score_with_retry_stream
 
 # ロガー設定
 logging.basicConfig(level=logging.INFO)
@@ -125,8 +126,11 @@ def generate_medical_question(theme: str) -> str:
 def score_medical_answer_stream(question: str, answer: str):
     """
     ユーザーの回答を医学部採用試験の基準で評価し、フィードバックと模範解答をストリーミングで返します。
+    リトライ機能付きで503エラーなどに対応。
     """
-    prompt = f"""
+    # リトライ機能付きの採点関数を定義
+    def _score_medical_internal():
+        prompt = f"""
 # 指示
 あなたは医学部採用試験の採点委員です。医師として実際に働く上で必要な知識と判断力を評価してください。
 以下の回答を、医学部採用試験の採点基準に沿って厳格に評価・添削してください。
@@ -184,13 +188,21 @@ def score_medical_answer_stream(question: str, answer: str):
 
 # 医学部採用試験レベルでの評価とフィードバック
 """
+        try:
+            client = _get_gemini_client()
+            stream = client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt)
+            return stream
+        except Exception as e:
+            logger.error(f"Error scoring medical answer: {e}")
+            raise e
+    
+    # リトライ機能付きでストリーミング実行
     try:
-        client = _get_gemini_client()
-        stream = client.models.generate_content_stream(model=GEMINI_MODEL, contents=prompt)
-        return stream
+        yield from score_with_retry_stream(_score_medical_internal)
     except Exception as e:
-        logger.error(f"Error scoring medical answer: {e}")
-        return _create_error_stream(e)
+        # 最終的にエラーが発生した場合
+        logger.error(f"Final error in score_medical_answer_stream: {e}")
+        yield from _create_error_stream(e)
 
 def _is_theme_similar(theme1: str, theme2: str) -> bool:
     """

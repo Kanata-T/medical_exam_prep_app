@@ -3,15 +3,115 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from modules.utils import load_history
 import json
+import os
+from pathlib import Path
 
+# 必要な関数のインポート
+try:
+    from modules.utils import extract_scores
+except ImportError:
+    def extract_scores(feedback_text):
+        """フォールバック関数: フィードバックからスコアを抽出"""
+        scores = {}
+        lines = feedback_text.split('\n')
+        for line in lines:
+            if '/10' in line or '点' in line:
+                # 簡単なスコア抽出ロジック
+                import re
+                score_match = re.search(r'(\d+(?:\.\d+)?)\s*[/:]?\s*(?:10|点)', line)
+                if score_match:
+                    score_value = float(score_match.group(1))
+                    if '翻訳' in line:
+                        scores['翻訳評価'] = score_value
+                    elif '意見' in line:
+                        scores['意見評価'] = score_value
+                    elif '総合' in line:
+                        scores['総合評価'] = score_value
+        return scores
+
+# 採点関数のインポート
+try:
+    from modules.scorer import score_exam_stream, score_reading_stream, score_exam_style_stream
+    from modules.essay_scorer import score_long_essay_stream
+    from modules.medical_knowledge_checker import score_medical_answer_stream
+    from modules.interview_prepper import score_interview_answer_stream
+except ImportError as e:
+    st.error(f"採点モジュールのインポートエラー: {e}")
+
+# ページ設定
 st.set_page_config(
-    page_title="学習履歴",
+    page_title="学習履歴", 
     page_icon="📚",
     layout="wide",
-    initial_sidebar_state="auto"
+    initial_sidebar_state="expanded"
 )
+
+st.title("📚 学習履歴")
+
+try:
+    from modules.database import db_manager
+    database_available = True
+    
+    # データベース分析を表示
+    with st.expander("🔍 データベース分析", expanded=False):
+        if st.button("📊 練習タイプ分析を実行"):
+            with st.spinner("データベースを分析中..."):
+                analysis = db_manager.analyze_practice_types()
+                
+                if "error" in analysis:
+                    st.error(f"分析エラー: {analysis['error']}")
+                else:
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("総記録数", analysis["total_records"])
+                    with col2:
+                        st.metric("練習タイプ数", analysis["unique_practice_types"])
+                    with col3:
+                        st.metric("未分類タイプ", len(analysis["unrecognized_types"]))
+                    
+                    if analysis["practice_types"]:
+                        st.subheader("📋 練習タイプ別の記録数")
+                        
+                        # 練習タイプ別の詳細表示
+                        type_df = pd.DataFrame([
+                            {
+                                "練習タイプ": practice_type,
+                                "表示名": analysis["display_names"].get(practice_type, practice_type),
+                                "記録数": count,
+                                "カテゴリ": db_manager.practice_type_manager.get_category_for_type(practice_type)[0],
+                                "サブカテゴリ": db_manager.practice_type_manager.get_category_for_type(practice_type)[1]
+                            }
+                            for practice_type, count in analysis["practice_types"].items()
+                        ])
+                        
+                        st.dataframe(type_df, use_container_width=True)
+                        
+                        # カテゴリ別集計の円グラフ
+                        if analysis["categories"]:
+                            st.subheader("📊 カテゴリ別分布")
+                            
+                            category_data = [
+                                {"カテゴリ": category, "記録数": data["total"]}
+                                for category, data in analysis["categories"].items()
+                            ]
+                            
+                            if category_data:
+                                category_df = pd.DataFrame(category_data)
+                                fig = px.pie(category_df, names="カテゴリ", values="記録数", 
+                                           title="カテゴリ別記録数の分布")
+                                st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 未分類タイプの警告表示
+                    if analysis["unrecognized_types"]:
+                        st.warning("⚠️ 以下の練習タイプが分類システムに登録されていません:")
+                        for unrecognized_type in analysis["unrecognized_types"]:
+                            st.write(f"- `{unrecognized_type}`")
+
+except ImportError:
+    database_available = False
+    st.warning("データベース機能が利用できません。ローカルファイルのみ表示します。")
 
 # モダンなカスタムCSS
 st.markdown("""
@@ -305,49 +405,135 @@ except ImportError:
 st.markdown("---")
 
 # データの読み込み（Supabase対応）
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)  # キャッシュ時間を延長して重複リクエストを削減
 def load_and_process_history():
     """全練習タイプの履歴をSupabaseまたはローカルから読み込み"""
     try:
-        # Supabaseから全ての履歴を取得
-        from modules.database import db_manager
+        if not database_available:
+            return load_local_history()
         
-        # 全練習タイプの履歴を統合取得
-        practice_types = [
-            '採用試験',
-            '過去問スタイル採用試験',  
-            '小論文対策',
-            '面接対策(単発)',
-            '面接対策(セッション)',
-            '医学部採用試験 自由記述',
-            '英語読解',
-            '過去問スタイル英語読解'
-        ]
+        # Supabaseから全ての履歴を動的に取得
+        # 実際にデータベースに存在する練習タイプを自動検出
+        actual_practice_types = db_manager.get_all_unique_practice_types()
         
+        if not actual_practice_types:
+            st.info("📝 まだ練習履歴がありません。各練習ページで問題を解いてみましょう！")
+            return None, pd.DataFrame(), pd.DataFrame()
+        
+        # 一括取得で重複APIリクエストを削減
+        # practice_types=Noneを渡すことで、すべての練習タイプを自動取得
+        history_by_type = db_manager.load_all_practice_history_batch(practice_types=None)
+        
+        # 統合履歴リストを作成
         all_history = []
-        for practice_type in practice_types:
-            try:
-                practice_history = db_manager.load_practice_history(practice_type)
-                all_history.extend(practice_history)
-            except Exception as e:
-                # 特定の練習タイプでエラーが発生しても他は続行
-                st.warning(f"⚠️ {practice_type}の履歴取得中にエラー: {e}")
-                continue
+        for practice_type, practice_history in history_by_type.items():
+            all_history.extend(practice_history)
         
         # 日付順でソート（新しい順）
         all_history.sort(key=lambda x: x.get('date', ''), reverse=True)
         
         if not all_history:
             return None, pd.DataFrame(), pd.DataFrame()
-            
-        return all_history, _process_to_dataframes(all_history)
         
-    except ImportError:
-        # フォールバック: 従来のローカルファイル読み込み
-        history_data = load_history()
-        if not history_data:
+        # デバッグ情報: 取得された練習タイプを表示    
+        detected_types = list(history_by_type.keys())
+        if detected_types:
+            st.sidebar.info(f"📊 取得された練習タイプ ({len(detected_types)}種類):\n" + 
+                          "\n".join([f"• {db_manager.practice_type_manager.get_display_name(pt)} ({len(history_by_type[pt])}件)" 
+                                   for pt in sorted(detected_types)]))
+        
+        # DataFrameに変換（改良版）
+        rows = []
+        for item in all_history:
+            try:
+                # 基本情報
+                row = {
+                    '日付': item.get('date', ''),
+                    '練習タイプ': item.get('type', ''),
+                    '表示名': item.get('display_name', item.get('type', '')),
+                    'カテゴリ': item.get('category', ''),
+                    'サブカテゴリ': item.get('subcategory', ''),
+                    '時間': item.get('duration_display', ''),
+                    'フィードバック': item.get('feedback', ''),
+                    'スコア有無': bool(item.get('scores')),
+                    'エラー有無': 'エラー' in item.get('feedback', '') or 'UNAVAILABLE' in item.get('feedback', '')
+                }
+                
+                # スコア情報の抽出
+                scores = item.get('scores', {})
+                if scores and isinstance(scores, dict):
+                    for score_name, score_value in scores.items():
+                        if isinstance(score_value, (int, float)):
+                            row[f'スコア_{score_name}'] = score_value
+                
+                rows.append(row)
+                
+            except Exception as e:
+                st.error(f"データ処理エラー: {e}")
+                continue
+        
+        if not rows:
             return None, pd.DataFrame(), pd.DataFrame()
-        return history_data, _process_to_dataframes(history_data)
+        
+        df = pd.DataFrame(rows)
+        
+        # 日付を適切な形式に変換
+        try:
+            df['日付'] = pd.to_datetime(df['日付'])
+        except:
+            # 日付の変換に失敗した場合はそのまま使用
+            pass
+        
+        # 統計データフレームを作成
+        stats_rows = []
+        
+        # カテゴリ別統計
+        for category in df['カテゴリ'].unique():
+            category_df = df[df['カテゴリ'] == category]
+            stats_rows.append({
+                '分類': 'カテゴリ',
+                '名前': category,
+                '練習回数': len(category_df),
+                '最新日付': category_df['日付'].max() if len(category_df) > 0 else None,
+                'エラー件数': len(category_df[category_df['エラー有無'] == True])
+            })
+        
+        # 練習タイプ別統計
+        for practice_type in df['練習タイプ'].unique():
+            type_df = df[df['練習タイプ'] == practice_type]
+            display_name = db_manager.practice_type_manager.get_display_name(practice_type)
+            stats_rows.append({
+                '分類': '練習タイプ',
+                '名前': f"{display_name} ({practice_type})",
+                '練習回数': len(type_df),
+                '最新日付': type_df['日付'].max() if len(type_df) > 0 else None,
+                'エラー件数': len(type_df[type_df['エラー有無'] == True])
+            })
+        
+        stats_df = pd.DataFrame(stats_rows)
+        
+        return all_history, df, stats_df
+        
+    except Exception as e:
+        st.error(f"履歴の読み込みでエラーが発生しました: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None, pd.DataFrame(), pd.DataFrame()
+
+def load_local_history():
+    """ローカルファイルから履歴を読み込み"""
+    history_file = Path("history.json")
+    if history_file.exists():
+        try:
+            with open(history_file, "r", encoding="utf-8") as f:
+                history_data = json.load(f)
+            return history_data, _process_to_dataframes(history_data)
+        except json.JSONDecodeError:
+            st.error("履歴ファイルのデコードに失敗しました。")
+            return None, pd.DataFrame(), pd.DataFrame()
+    else:
+        st.info("履歴ファイルが見つかりません。")
+        return None, pd.DataFrame(), pd.DataFrame()
 
 def _process_to_dataframes(history_data):
     """履歴データをDataFrameに変換"""
@@ -431,8 +617,8 @@ with st.sidebar:
     )
     
     today = datetime.now().date()
-    min_date = df_base['date'].min().date()
-    max_date = df_base['date'].max().date()
+    min_date = df_base['日付'].min().date()
+    max_date = df_base['日付'].max().date()
 
     if date_range_option == "カスタム":
         start_date = st.date_input("開始日", min_date, min_value=min_date, max_value=max_date)
@@ -445,7 +631,7 @@ with st.sidebar:
             start_date = min_date
         end_date = today
 
-    available_types = df_base['type'].unique().tolist()
+    available_types = df_base['練習タイプ'].unique().tolist()
     selected_types = st.multiselect("📚 練習タイプ", available_types, default=available_types)
     
     if not df_scores.empty:
@@ -461,8 +647,8 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # データフィルタリング
-base_mask_date = (df_base['date'].dt.date >= start_date) & (df_base['date'].dt.date <= end_date)
-base_mask_type = df_base['type'].isin(selected_types)
+base_mask_date = (df_base['日付'].dt.date >= start_date) & (df_base['日付'].dt.date <= end_date)
+base_mask_type = df_base['練習タイプ'].isin(selected_types)
 filtered_base = df_base[base_mask_date & base_mask_type]
 
 if not df_scores.empty:
@@ -473,15 +659,64 @@ if not df_scores.empty:
 else:
     filtered_scores = pd.DataFrame(columns=df_scores.columns)
 
-# メイン画面
-if filtered_base.empty:
-    st.warning("選択されたフィルターに一致するデータがありません。")
-    st.stop()
+# タブ作成
+tab1, tab2, tab3, tab4 = st.tabs(["📈 統計サマリー", "📊 詳細分析", "📋 履歴一覧", "🔧 エラー確認"])
 
-# サマリー統計
-st.markdown('<div class="section-header">📈 学習サマリー</div>', unsafe_allow_html=True)
+with tab1:
+    # メイン画面
+    if filtered_base.empty:
+        st.warning("選択されたフィルターに一致するデータがありません。")
+    else:
+        # サマリー統計
+        st.markdown('<div class="section-header">📈 学習サマリー</div>', unsafe_allow_html=True)
+        
+        # 練習タイプ別の回数を棒グラフで表示（表示名を使用）
+        if len(filtered_base) > 0:
+            display_name_mapping = {}
+            for practice_type in filtered_base['練習タイプ'].unique():
+                if database_available:
+                    display_name_mapping[practice_type] = db_manager.practice_type_manager.get_display_name(practice_type)
+                else:
+                    display_name_mapping[practice_type] = practice_type
+            
+            # 表示名でグループ化してカウント
+            filtered_base_with_display = filtered_base.copy()
+            filtered_base_with_display['表示名'] = filtered_base_with_display['練習タイプ'].map(display_name_mapping)
+            type_counts = filtered_base_with_display['表示名'].value_counts()
+            
+            col_chart1, col_chart2 = st.columns(2)
+            
+            with col_chart1:
+                fig_type = px.bar(
+                    x=type_counts.values, 
+                    y=type_counts.index,
+                    orientation='h',
+                    title='練習タイプ別回数',
+                    labels={'x': '回数', 'y': '練習タイプ'},
+                    color=type_counts.values,
+                    color_continuous_scale='Viridis'
+                )
+                fig_type.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig_type, use_container_width=True)
+            
+            with col_chart2:
+                # 曜日別練習回数
+                filtered_base_copy = filtered_base.copy()
+                filtered_base_copy['weekday'] = filtered_base_copy['日付'].dt.day_name()
+                weekday_counts = filtered_base_copy['weekday'].value_counts()
+                
+                fig_weekday = px.bar(
+                    x=weekday_counts.index,
+                    y=weekday_counts.values,
+                    title='曜日別練習回数',
+                    labels={'x': '曜日', 'y': '回数'},
+                    color=weekday_counts.values,
+                    color_continuous_scale='Blues'
+                )
+                fig_weekday.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig_weekday, use_container_width=True)
 total_practices = len(filtered_base)
-days_active = filtered_base['date'].dt.date.nunique()
+days_active = filtered_base['日付'].dt.date.nunique()
 
 # 統計カードをStreamlitのcolumnsで実装
 col1, col2, col3, col4 = st.columns(4)
@@ -546,9 +781,10 @@ with col4:
     </div>
     """.format(duration_text), unsafe_allow_html=True)
 
-# 詳細分析タブ
-st.markdown('<div class="section-header">📊 詳細分析</div>', unsafe_allow_html=True)
-tab1, tab2, tab3 = st.tabs(["📈 スコア推移", "🎯 カテゴリ別分析", "📅 学習パターン"])
+with tab2:
+    # 詳細分析タブ
+    st.markdown('<div class="section-header">📊 詳細分析</div>', unsafe_allow_html=True)
+    subtab1, subtab2, subtab3 = st.tabs(["📈 スコア推移", "🎯 カテゴリ別分析", "📅 学習パターン"])
 
 with tab1:
     if not filtered_scores.empty and len(filtered_scores) > 1:
@@ -612,7 +848,7 @@ with tab2:
 with tab3:
     # 曜日別練習回数
     filtered_base_copy = filtered_base.copy()
-    filtered_base_copy['weekday'] = filtered_base_copy['date'].dt.day_name()
+    filtered_base_copy['weekday'] = filtered_base_copy['日付'].dt.day_name()
     weekday_counts = filtered_base_copy['weekday'].value_counts()
     
     fig_weekday = px.bar(
@@ -637,11 +873,11 @@ with tab3:
         
         fig_duration = px.line(
             filtered_with_duration_copy,
-            x='date',
+            x='日付',
             y='duration_minutes',
-            color='type',
+            color='練習タイプ',
             title='所要時間の推移',
-            labels={'duration_minutes': '所要時間（分）', 'date': '日付'},
+            labels={'duration_minutes': '所要時間（分）', '日付': '日付'},
             color_discrete_sequence=px.colors.qualitative.Set2
         )
         fig_duration.update_layout(
@@ -654,89 +890,317 @@ with tab3:
     else:
         st.info("📊 所要時間が記録されているデータが2件以上ある場合に所要時間推移が表示されます。")
 
-# 履歴詳細
-st.markdown('<div class="section-header">📜 練習履歴詳細</div>', unsafe_allow_html=True)
-
-# エクスポート
-csv_data = filtered_scores.to_csv(index=False).encode('utf-8')
-st.download_button(
-    label="📥 表示中のデータをCSVでダウンロード",
-    data=csv_data,
-    file_name=f"学習履歴_{datetime.now().strftime('%Y%m%d')}.csv",
-    mime="text/csv",
-    use_container_width=True
-)
-
-# タイムライン形式の履歴表示
-st.markdown('<div class="timeline-container">', unsafe_allow_html=True)
-
-for item in reversed(history): # 新しい順に
-    item_date = pd.to_datetime(item.get('date'))
-    # フィルタに合致するかチェック
-    if not (
-        item_date.date() >= start_date and
-        item_date.date() <= end_date and
-        item.get('type') in selected_types
-    ):
-        continue
-
-    scores = item.get('scores')
+with tab3:
+    # 履歴詳細タブ
+    st.markdown('<div class="section-header">📜 練習履歴詳細</div>', unsafe_allow_html=True)
     
-    # スコア範囲フィルタのチェック
-    if 'score_range' in locals() and scores:
-        # このアイテムのいずれかのスコアが範囲内にあるか
-        in_range = any(score_range[0] <= s <= score_range[1] for s in scores.values())
-        if not in_range:
+    # エクスポート
+    if not filtered_scores.empty:
+        csv_data = filtered_scores.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 表示中のデータをCSVでダウンロード",
+            data=csv_data,
+            file_name=f"学習履歴_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    # タイムライン形式の履歴表示
+    st.markdown('<div class="timeline-container">', unsafe_allow_html=True)
+    
+    filtered_history = []
+    for item in history:
+        item_date = pd.to_datetime(item.get('date'))
+        # フィルタに合致するかチェック
+        if not (
+            item_date.date() >= start_date and
+            item_date.date() <= end_date and
+            item.get('type') in selected_types
+        ):
             continue
-
-    date_str = item_date.strftime('%Y/%m/%d')
-    time_str = item_date.strftime('%H:%M')
-    item_type = item.get('type', '不明')
-    duration_display = item.get('duration_display', '未記録')
     
-    # タイムラインアイテムの作成
-    timeline_item_html = f'''
-    <div class="timeline-item type-{item_type}">
-        <div class="timeline-header">
-            <h3 class="timeline-title">{item_type}
-                <span class="timeline-badge badge-{item_type}">{item_type}</span>
-            </h3>
-            <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
-                <div class="timeline-date">{date_str} {time_str}</div>
-                <div style="font-size: 0.8rem; color: #6b7280; background: #f9fafb; padding: 0.125rem 0.5rem; border-radius: 12px;">
-                    ⏱️ {duration_display}
-                </div>
-            </div>
-        </div>
-    '''
-    
-    if scores:
-        timeline_item_html += '<div class="score-container">'
-        for category, score in scores.items():
-            timeline_item_html += f'''
-            <div class="score-badge">
-                <p class="score-value">{score}/10</p>
-                <p class="score-label">{category}</p>
-            </div>
-            '''
-        timeline_item_html += '</div>'
-    
-    timeline_item_html += '</div>'
-    st.markdown(timeline_item_html, unsafe_allow_html=True)
-    
-    # エクスパンダーでフィードバックと回答内容
-    with st.expander("📝 AIフィードバックと回答内容を見る"):
-        st.markdown("**🤖 AIフィードバック**")
-        feedback_text = item.get('feedback', 'フィードバックがありません。')
-        st.markdown(f'<div style="background: #f8fafc; padding: 1rem; border-radius: 8px; border-left: 4px solid #667eea;">{feedback_text}</div>', unsafe_allow_html=True)
+        scores = item.get('scores')
         
-        st.markdown("**✍️ あなたの回答**")
-        inputs = item.get('inputs', {})
-        for key, value in inputs.items():
-            if isinstance(value, str) and value.strip():
-                st.text_area(f"{key}", value, key=f"input_{item['date']}_{key}", disabled=True, height=100)
+        # スコア範囲フィルタのチェック
+        if 'score_range' in locals() and scores:
+            # このアイテムのいずれかのスコアが範囲内にあるか
+            in_range = any(score_range[0] <= s <= score_range[1] for s in scores.values())
+            if not in_range:
+                continue
+        
+        filtered_history.append(item)
+    
+    if not filtered_history:
+        st.info("選択されたフィルターに一致する履歴がありません。")
+    else:
+        for item in reversed(filtered_history[-20:]):  # 最新20件を表示
+            item_date = pd.to_datetime(item.get('date'))
+            date_str = item_date.strftime('%Y/%m/%d')
+            time_str = item_date.strftime('%H:%M')
+            item_type = item.get('type', '不明')
+            display_name = item.get('display_name', item_type) if database_available else item_type
+            duration_display = item.get('duration_display', '未記録')
+            
+            # タイムラインアイテムの作成
+            timeline_item_html = f'''
+            <div class="timeline-item type-{item_type}">
+                <div class="timeline-header">
+                    <h3 class="timeline-title">{display_name}
+                        <span class="timeline-badge badge-{item_type}">{display_name}</span>
+                    </h3>
+                    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
+                        <div class="timeline-date">{date_str} {time_str}</div>
+                        <div style="font-size: 0.8rem; color: #6b7280; background: #f9fafb; padding: 0.125rem 0.5rem; border-radius: 12px;">
+                            ⏱️ {duration_display}
+                        </div>
+                    </div>
+                </div>
+            '''
+            
+            scores = item.get('scores')
+            if scores:
+                timeline_item_html += '<div class="score-container">'
+                for category, score in scores.items():
+                    timeline_item_html += f'''
+                    <div class="score-badge">
+                        <p class="score-value">{score}/10</p>
+                        <p class="score-label">{category}</p>
+                    </div>
+                    '''
+                timeline_item_html += '</div>'
+            
+            timeline_item_html += '</div>'
+            st.markdown(timeline_item_html, unsafe_allow_html=True)
+            
+            # エクスパンダーでフィードバックと回答内容
+            with st.expander("📝 AIフィードバックと回答内容を見る"):
+                st.markdown("**🤖 AIフィードバック**")
+                feedback_text = item.get('feedback', 'フィードバックがありません。')
+                st.markdown(f'<div style="background: #f8fafc; padding: 1rem; border-radius: 8px; border-left: 4px solid #667eea;">{feedback_text}</div>', unsafe_allow_html=True)
+                
+                st.markdown("**✍️ あなたの回答**")
+                inputs = item.get('inputs', {})
+                
+                # キーワード生成と論文検索の特別処理
+                if database_available and db_manager.practice_type_manager.is_keyword_generation_type(item_type):
+                    st.text_area("生成されたキーワード", item.get('keywords', ''), key=f"keywords_{item['date']}", disabled=True, height=100)
+                    st.text_area("カテゴリ", item.get('category', ''), key=f"category_{item['date']}", disabled=True, height=50)
+                    st.text_area("根拠", item.get('rationale', ''), key=f"rationale_{item['date']}", disabled=True, height=100)
+                elif database_available and db_manager.practice_type_manager.is_paper_search_type(item_type):
+                    st.text_area("検索キーワード", item.get('search_keywords', ''), key=f"search_keywords_{item['date']}", disabled=True, height=50)
+                    st.text_area("論文タイトル", item.get('paper_title', ''), key=f"paper_title_{item['date']}", disabled=True, height=100)
+                    st.text_area("論文要約", item.get('paper_abstract', ''), key=f"paper_abstract_{item['date']}", disabled=True, height=200)
+                else:
+                    # 通常の練習の場合
+                    for key, value in inputs.items():
+                        if isinstance(value, str) and value.strip():
+                            st.text_area(f"{key}", value, key=f"input_{item['date']}_{key}", disabled=True, height=100)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown('</div>', unsafe_allow_html=True)
+def rescore_practice_record(error_record):
+    """
+    エラーのあった練習記録を再採点します
+    
+    Args:
+        error_record: エラー記録の辞書
+        
+    Returns:
+        bool: 再採点の成功/失敗
+    """
+    practice_type = error_record['practice_type']
+    inputs = error_record['inputs']
+    original_item = error_record['original_item']
+    
+    try:
+        # 練習タイプに応じて採点関数を選択
+        stream = None
+        
+        if practice_type in ['採用試験']:
+            from modules.scorer import score_exam_stream
+            stream = score_exam_stream(
+                inputs.get('abstract', inputs.get('original_abstract', '')),
+                inputs.get('translation', ''),
+                inputs.get('opinion', ''),
+                inputs.get('essay', ''),
+                inputs.get('essay_theme', '')
+            )
+        elif practice_type.startswith('過去問スタイル採用試験'):
+            from modules.scorer import score_exam_style_stream
+            # 過去問スタイルの場合
+            exam_data = inputs.get('exam_data', {})
+            format_type = inputs.get('format_type', 'letter_translation_opinion')
+            content = exam_data.get('formatted_content', '')
+            task_instruction = exam_data.get('task1', '')
+            
+            stream = score_exam_style_stream(
+                content,
+                inputs.get('translation', ''),
+                inputs.get('opinion', ''),
+                format_type,
+                task_instruction
+            )
+        elif practice_type == '小論文対策':
+            from modules.essay_scorer import score_long_essay_stream
+            stream = score_long_essay_stream(
+                inputs.get('theme', ''),
+                inputs.get('memo', ''),
+                inputs.get('essay', '')
+            )
+        elif practice_type == '医学部採用試験 自由記述':
+            from modules.medical_knowledge_checker import score_medical_answer_stream
+            stream = score_medical_answer_stream(
+                inputs.get('question', ''),
+                inputs.get('answer', '')
+            )
+        elif practice_type in ['英語読解', '過去問スタイル英語読解']:
+            if practice_type == '過去問スタイル英語読解':
+                from modules.scorer import score_exam_style_stream
+                # 過去問スタイル英語読解
+                exam_data = inputs.get('exam_data', {})
+                format_type = inputs.get('format_type', 'letter_translation_opinion')
+                content = exam_data.get('formatted_content', '')
+                task_instruction = exam_data.get('task1', '')
+                
+                stream = score_exam_style_stream(
+                    content,
+                    inputs.get('translation', ''),
+                    inputs.get('opinion', ''),
+                    format_type,
+                    task_instruction
+                )
+            else:
+                from modules.scorer import score_reading_stream
+                # 標準英語読解
+                stream = score_reading_stream(
+                    inputs.get('abstract', ''),
+                    inputs.get('translation', ''),
+                    inputs.get('opinion', '')
+                )
+        elif practice_type in ['面接対策(単発)', '面接対策(セッション)']:
+            if practice_type == '面接対策(単発)':
+                from modules.interview_prepper import score_interview_answer_stream
+                stream = score_interview_answer_stream(
+                    inputs.get('question', ''),
+                    inputs.get('answer', '')
+                )
+            else:
+                # セッション形式は再採点が困難なため、スキップ
+                st.warning("面接セッション形式の再採点はサポートされていません。")
+                return False
+        else:
+            st.error(f"未対応の練習タイプです: {practice_type}")
+            return False
+        
+        if stream is None:
+            st.error("採点ストリームの生成に失敗しました。")
+            return False
+        
+        # ストリーミング結果を取得
+        with st.container():
+            st.write("**再採点結果:**")
+            feedback_placeholder = st.empty()
+            full_feedback = ""
+            
+            for chunk in stream:
+                if hasattr(chunk, 'text') and chunk.text:
+                    full_feedback += chunk.text
+                    feedback_placeholder.markdown(full_feedback + "▌")
+            
+            feedback_placeholder.markdown(full_feedback)
+        
+        # スコアを抽出
+        scores = extract_scores(full_feedback)
+        
+        # 履歴を更新
+        updated_data = original_item.copy()
+        updated_data['feedback'] = full_feedback
+        updated_data['scores'] = scores
+        
+        # データベースに保存
+        from modules.database import db_manager
+        success = db_manager.save_practice_history(updated_data)
+        
+        return success
+        
+    except Exception as e:
+        st.error(f"再採点処理中にエラー: {e}")
+        return False
+
+with tab4:
+    # エラー確認と再採点機能
+    if database_available:
+        st.subheader("🔧 採点エラーの確認と再実行")
+        
+        try:
+            # エラーのある履歴を取得
+            error_records = db_manager.has_scoring_errors()
+            
+            if not error_records:
+                st.success("✅ 採点エラーのある履歴は見つかりませんでした。")
+            else:
+                st.warning(f"⚠️ {len(error_records)}件の採点エラーが見つかりました。")
+                
+                # 一括再採点ボタン
+                if st.button("🔄 すべてのエラーを一括再採点", type="primary"):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    success_count = 0
+                    for i, error_record in enumerate(error_records):
+                        status_text.text(f"再採点中... ({i+1}/{len(error_records)})")
+                        progress_bar.progress((i+1) / len(error_records))
+                        
+                        try:
+                            if rescore_practice_record(error_record):
+                                success_count += 1
+                        except Exception as e:
+                            st.error(f"記録 {i+1} の再採点に失敗: {e}")
+                    
+                    st.success(f"✅ {success_count}/{len(error_records)}件の再採点が完了しました。")
+                    st.rerun()
+                
+                # エラー履歴を個別表示
+                for i, error_record in enumerate(error_records):
+                    with st.expander(f"エラー記録 {i+1}: {error_record['practice_type']} ({error_record['date'][:10]})"):
+                        st.write("**練習タイプ:**", error_record['practice_type'])
+                        st.write("**日時:**", error_record['date'])
+                        
+                        # エラー内容を表示
+                        st.write("**エラー内容:**")
+                        st.code(error_record['error_feedback'])
+                        
+                        # 入力データの確認
+                        inputs = error_record['inputs']
+                        st.write("**入力データ:**")
+                        for key, value in inputs.items():
+                            if isinstance(value, str) and len(value) > 100:
+                                st.write(f"- **{key}**: {value[:100]}...")
+                            else:
+                                st.write(f"- **{key}**: {value}")
+                        
+                        # 個別再採点ボタン
+                        if st.button(f"🔄 個別再採点", key=f"rescore_{i}", type="secondary"):
+                            st.info("再採点を実行中...")
+                            
+                            try:
+                                success = rescore_practice_record(error_record)
+                                
+                                if success:
+                                    st.success("✅ 再採点が完了しました！")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ 再採点に失敗しました。")
+                                    
+                            except Exception as e:
+                                st.error(f"再採点中にエラーが発生しました: {e}")
+        
+        except Exception as e:
+            st.error(f"エラー確認機能でエラーが発生しました: {e}")
+    else:
+        st.warning("データベース機能が利用できません。エラー確認機能はSupabase接続が必要です。")
+
+st.markdown("---")
 
 # ナビゲーション
 st.markdown('<div class="section-header">🚀 他のページへ移動</div>', unsafe_allow_html=True)

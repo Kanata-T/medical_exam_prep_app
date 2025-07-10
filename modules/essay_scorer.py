@@ -1,6 +1,6 @@
 import streamlit as st
 import google.genai as genai
-from modules.utils import safe_api_call
+from modules.utils import safe_api_call, score_with_retry_stream
 import re
 
 def validate_essay_inputs(theme, memo, essay):
@@ -184,6 +184,7 @@ class EssayError(Exception):
 def score_long_essay_stream(theme, memo, essay):
     """
     小論文の構成メモと清書を採点し、結果をストリーミングで返す。
+    リトライ機能付きで503エラーなどに対応。
     
     Args:
         theme (str): 小論文テーマ
@@ -198,47 +199,39 @@ def score_long_essay_stream(theme, memo, essay):
     if not is_valid:
         yield type('ErrorChunk', (), {'text': f"❌ 入力エラー: {error_msg}"})()
         return
-    
-    try:
-        client = genai.Client()
-        prompt = get_long_essay_scoring_prompt(theme, memo, essay)
-        
-        # ストリーミング応答を生成
-        response_stream = client.models.generate_content_stream(
-            model='gemini-2.5-pro',
-            contents=prompt
-        )
-        
-        # レスポンスが有効かチェック
-        if not response_stream:
-            raise EssayError("AI採点システムから応答が得られませんでした。")
-        
-        chunk_count = 0
-        for chunk in response_stream:
-            chunk_count += 1
-            if hasattr(chunk, 'text') and chunk.text:
-                yield chunk
-            else:
-                # 無効なチャンクの場合は警告を表示
-                yield type('WarningChunk', (), {
-                    'text': f"\n⚠️ [チャンク{chunk_count}] 応答形式が予期しない形式です。\n"
-                })()
-        
-        # チャンクが全く受信されなかった場合
-        if chunk_count == 0:
-            raise EssayError("採点結果を取得できませんでした。")
+
+    # リトライ機能付きの採点関数を定義
+    def _score_essay_internal():
+        try:
+            client = genai.Client()
+            prompt = get_long_essay_scoring_prompt(theme, memo, essay)
             
-    except EssayError as e:
-        yield type('ErrorChunk', (), {'text': f"❌ 採点エラー: {str(e)}"})()
-    except Exception as e:
-        # 予期しないエラーの場合
-        error_msg = f"❌ システムエラーが発生しました: {str(e)}"
-        if "quota" in str(e).lower():
-            error_msg += "\n\n💡 API使用量の上限に達している可能性があります。しばらく時間をおいてから再試行してください。"
-        elif "authentication" in str(e).lower():
-            error_msg += "\n\n💡 API認証に問題があります。APIキーの設定を確認してください。"
-        
-        yield type('ErrorChunk', (), {'text': error_msg})()
+            # ストリーミング応答を生成
+            response_stream = client.models.generate_content_stream(
+                model='gemini-2.5-pro',
+                contents=prompt
+            )
+            
+            # レスポンスが有効かチェック
+            if not response_stream:
+                raise EssayError("AI採点システムから応答が得られませんでした。")
+            
+            return response_stream
+            
+        except EssayError as e:
+            raise e
+        except Exception as e:
+            # 予期しないエラーの場合
+            error_msg = f"システムエラーが発生しました: {str(e)}"
+            if "quota" in str(e).lower():
+                error_msg += "\n\nAPI使用量の上限に達している可能性があります。しばらく時間をおいてから再試行してください。"
+            elif "authentication" in str(e).lower():
+                error_msg += "\n\nAPI認証に問題があります。APIキーの設定を確認してください。"
+            
+            raise EssayError(error_msg)
+    
+    # リトライ機能付きでストリーミング実行
+    yield from score_with_retry_stream(_score_essay_internal)
 
 def get_essay_writing_tips():
     """

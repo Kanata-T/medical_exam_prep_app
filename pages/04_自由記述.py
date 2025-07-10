@@ -88,7 +88,7 @@ if not api_ok:
     st.stop()
 
 # --- 履歴データの処理 ---
-@st.cache_data(ttl=60)  # キャッシュ時間を短縮
+@st.cache_data(ttl=300)  # キャッシュ時間を適切に設定
 def load_and_process_free_writing_history():
     """自由記述の履歴データを読み込んで処理"""
     try:

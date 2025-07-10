@@ -6,6 +6,8 @@ from datetime import datetime
 from google import genai
 import pickle
 import hashlib
+import time
+import random
 
 HISTORY_DIR = "history"
 SESSION_BACKUP_DIR = "session_backup"
@@ -25,7 +27,6 @@ def get_session_id():
     # セッション状態からIDを取得、なければ生成
     if 'session_id' not in st.session_state:
         # ユーザーのIPアドレスやタイムスタンプからセッションIDを生成
-        import time
         session_data = f"{time.time()}_{id(st.session_state)}"
         st.session_state.session_id = hashlib.md5(session_data.encode()).hexdigest()[:12]
     
@@ -344,10 +345,13 @@ def extract_scores(feedback):
 
 def format_history_for_download(data):
     """Formats a history record into a string for downloading."""
-    s = f"# {data['type']} 練習結果\n\n"
+    practice_type = data['type']
+    s = f"# {practice_type} 練習結果\n\n"
     s += f"実施日時: {datetime.fromisoformat(data['date']).strftime('%Y/%m/%d %H:%M')}\n\n"
     
-    if data['type'] == "採用試験":
+    # 採用試験系の処理（複数バリエーション対応）
+    if (practice_type == "採用試験" or 
+        practice_type.startswith("過去問スタイル採用試験")):
         s += f"## 課題\n\n"
         s += f"### Abstract\n{data['inputs']['abstract']}\n\n"
         if data['inputs'].get('citations'):
@@ -360,15 +364,53 @@ def format_history_for_download(data):
         s += f"### 日本語訳\n{data['inputs']['translation']}\n\n"
         s += f"### 意見\n{data['inputs']['opinion']}\n\n"
         s += f"### 小論文\n{data['inputs']['essay']}\n\n"
-    elif data['type'] == "小論文対策":
+    # 小論文対策
+    elif practice_type == "小論文対策":
         s += f"## 課題\n\n"
         s += f"### テーマ\n{data['inputs']['theme']}\n\n"
         s += f"## あなたの回答\n\n"
         s += f"### 構成メモ\n{data['inputs']['memo']}\n\n"
         s += f"### 清書\n{data['inputs']['essay']}\n\n"
-    elif data['type'] == "面接対策":
+    # 面接対策系（単発・セッション）
+    elif (practice_type in ["面接対策", "面接対策(単発)", "面接対策(セッション)"]):
         s += f"## 質問\n\n{data['inputs']['question']}\n\n"
         s += f"## あなたの回答\n\n{data['inputs']['answer']}\n\n"
+    # 自由記述対策
+    elif practice_type == "医学部採用試験 自由記述":
+        s += f"## 問題\n\n{data['inputs']['question']}\n\n"
+        s += f"## あなたの回答\n\n{data['inputs']['answer']}\n\n"
+    # 英語読解系の処理（複数バリエーション対応）
+    elif (practice_type == "英語読解" or 
+          practice_type.startswith("過去問スタイル英語読解")):
+        s += f"## 課題\n\n"
+        s += f"### Abstract\n{data['inputs']['abstract']}\n\n"
+        if data['inputs'].get('citations'):
+            s += f"### 引用元\n"
+            for citation in data['inputs']['citations']:
+                s += f"- [{citation['title']}]({citation['uri']})\n"
+            s += "\n"
+        s += f"## あなたの回答\n\n"
+        s += f"### 日本語訳\n{data['inputs']['translation']}\n\n"
+        s += f"### 意見\n{data['inputs']['opinion']}\n\n"
+    # キーワード生成系
+    elif practice_type.startswith("キーワード生成"):
+        s += f"## 生成結果\n\n"
+        s += f"### キーワード\n{data.get('keywords', '')}\n\n"
+        s += f"### カテゴリ\n{data.get('category', '')}\n\n"
+        s += f"### 根拠\n{data.get('rationale', '')}\n\n"
+    # 論文検索
+    elif practice_type == "論文検索":
+        s += f"## 検索結果\n\n"
+        s += f"### 検索キーワード\n{data.get('search_keywords', '')}\n\n"
+        s += f"### 論文タイトル\n{data.get('paper_title', '')}\n\n"
+        s += f"### 論文要約\n{data.get('paper_abstract', '')}\n\n"
+    # 未知の練習タイプ（一般的な表示）
+    else:
+        s += f"## 入力内容\n\n"
+        inputs = data.get('inputs', {})
+        for key, value in inputs.items():
+            if isinstance(value, str) and value.strip():
+                s += f"### {key}\n{value}\n\n"
 
     s += f"## AIによる採点結果\n\n{data['feedback']}"
     return s
@@ -865,3 +907,132 @@ def save_recent_theme(theme: str):
     # 最大5件まで保持
     if len(st.session_state.recent_knowledge_themes) > 5:
         st.session_state.recent_knowledge_themes = st.session_state.recent_knowledge_themes[:5]
+
+def api_call_with_retry(func, max_retries=3, base_delay=2, max_delay=60):
+    """
+    指数バックオフでAPIコールをリトライする関数
+    
+    Args:
+        func: 実行するAPI関数
+        max_retries: 最大リトライ回数
+        base_delay: 基本待機時間（秒）
+        max_delay: 最大待機時間（秒）
+    
+    Returns:
+        APIコールの結果またはエラー
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    for attempt in range(max_retries + 1):
+        try:
+            result = func()
+            if attempt > 0:
+                logger.info(f"API call succeeded on attempt {attempt + 1}")
+            return result
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            # リトライ可能なエラーかチェック
+            is_retryable = (
+                '503' in error_str or
+                'service unavailable' in error_str or
+                'unavailable' in error_str or
+                'overloaded' in error_str or
+                'quota' in error_str or
+                'rate limit' in error_str or
+                'timeout' in error_str
+            )
+            
+            if not is_retryable or attempt == max_retries:
+                # リトライ不可能なエラーまたは最大試行回数に達した
+                logger.error(f"API call failed permanently on attempt {attempt + 1}: {e}")
+                raise e
+            
+            # 指数バックオフで待機
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+            logger.warning(f"API call failed on attempt {attempt + 1}, retrying in {delay:.1f}s: {e}")
+            time.sleep(delay)
+    
+    # ここには到達しないはずだが、念のため
+    raise Exception("API call failed after all retries")
+
+def score_with_retry_stream(score_func, *args, **kwargs):
+    """
+    採点関数をリトライ機能付きでストリーミング実行する
+    
+    Args:
+        score_func: 採点関数
+        *args, **kwargs: 採点関数への引数
+    
+    Yields:
+        採点結果のストリーミングチャンク
+    """
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            # ストリーミング関数を実行
+            stream = score_func(*args, **kwargs)
+            
+            # ストリームの最初のチャンクを試行してエラーをチェック
+            first_chunk = None
+            chunk_count = 0
+            
+            for chunk in stream:
+                chunk_count += 1
+                
+                # 最初のチャンクをチェック
+                if first_chunk is None:
+                    first_chunk = chunk
+                    
+                    # エラーチャンクかチェック
+                    if hasattr(chunk, 'text') and chunk.text:
+                        text = chunk.text.lower()
+                        if ('503' in text and 'unavailable' in text) or 'overloaded' in text:
+                            # 503エラーの場合はリトライ
+                            if attempt < max_retries - 1:
+                                delay = 2 ** attempt + random.uniform(0, 1)
+                                yield type('RetryChunk', (), {
+                                    'text': f"\n⚠️ サーバーが混雑しています。{delay:.1f}秒後に再試行します... (試行 {attempt + 1}/{max_retries})\n"
+                                })()
+                                time.sleep(delay)
+                                break  # 内側のforループを抜けて再試行
+                            else:
+                                # 最後の試行の場合はそのまま返す
+                                yield chunk
+                                continue
+                
+                yield chunk
+            
+            # 正常にストリームが完了した場合
+            if chunk_count > 0 and first_chunk is not None:
+                if attempt > 0:
+                    yield type('SuccessChunk', (), {
+                        'text': f"\n✅ 再試行が成功しました（試行 {attempt + 1}回目）\n"
+                    })()
+                return  # 成功したので関数を終了
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            is_retryable = (
+                '503' in error_str or
+                'service unavailable' in error_str or
+                'unavailable' in error_str or
+                'overloaded' in error_str
+            )
+            
+            if is_retryable and attempt < max_retries - 1:
+                delay = 2 ** attempt + random.uniform(0, 1)
+                yield type('RetryChunk', (), {
+                    'text': f"\n⚠️ サーバーエラーが発生しました。{delay:.1f}秒後に再試行します... (試行 {attempt + 1}/{max_retries})\n"
+                })()
+                time.sleep(delay)
+                continue
+            else:
+                # リトライ不可能または最大試行回数に達した
+                yield type('ErrorChunk', (), {
+                    'text': f"\n❌ 採点処理でエラーが発生しました: {str(e)}\n\n💡 時間をおいて再度お試しください。"
+                })()
+                return
