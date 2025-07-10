@@ -70,6 +70,95 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to update last active time: {e}")
     
+    def _extract_inputs_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """練習タイプに応じてinputsデータを抽出"""
+        practice_type = data.get('type', '')
+        
+        # キーワード生成の場合の特別処理
+        if practice_type == 'キーワード生成':
+            inputs_data = {
+                'keywords': data.get('keywords', ''),
+                'category': data.get('category', ''),
+                'rationale': data.get('rationale', '')
+            }
+            logger.info(f"Keyword generation inputs: {inputs_data}")
+            return inputs_data
+        
+        # 論文検索の場合の特別処理
+        elif practice_type == '論文検索':
+            inputs_data = {
+                'search_keywords': data.get('search_keywords', ''),
+                'paper_title': data.get('paper_title', ''),
+                'paper_abstract': data.get('paper_abstract', ''),
+                'study_type': data.get('study_type', ''),
+                'relevance_score': data.get('relevance_score', ''),
+                'citations': data.get('citations', [])
+            }
+            logger.info(f"Paper search inputs: {list(inputs_data.keys())}")
+            return inputs_data
+        
+        # 通常の練習の場合（採用試験、小論文、面接、自由記述、英語読解）
+        else:
+            inputs_data = data.get('inputs', {})
+            logger.info(f"Regular practice inputs for {practice_type}: {list(inputs_data.keys()) if isinstance(inputs_data, dict) else 'Not a dict'}")
+            return inputs_data
+    
+    def _restore_data_structure(self, practice_type: str, practice_date: str, inputs: Dict[str, Any], 
+                               feedback: str, scores: Dict[str, Any], duration_seconds: int, 
+                               duration_display: str) -> Dict[str, Any]:
+        """練習タイプに応じてデータ構造を復元"""
+        
+        # キーワード生成の場合の特別処理
+        if practice_type == 'キーワード生成':
+            # inputsから直接キーとして展開
+            result = {
+                'type': practice_type,
+                'date': practice_date,
+                'keywords': inputs.get('keywords', ''),
+                'category': inputs.get('category', ''),
+                'rationale': inputs.get('rationale', ''),
+                'feedback': feedback,
+                'scores': scores,
+                'duration_seconds': duration_seconds,
+                'duration_display': duration_display
+            }
+            logger.debug(f"Restored keyword generation data: {list(result.keys())}")
+            return result
+        
+        # 論文検索の場合の特別処理  
+        elif practice_type == '論文検索':
+            # inputsから直接キーとして展開
+            result = {
+                'type': practice_type,
+                'date': practice_date,
+                'search_keywords': inputs.get('search_keywords', ''),
+                'paper_title': inputs.get('paper_title', ''),
+                'paper_abstract': inputs.get('paper_abstract', ''),
+                'study_type': inputs.get('study_type', ''),
+                'relevance_score': inputs.get('relevance_score', ''),
+                'citations': inputs.get('citations', []),
+                'feedback': feedback,
+                'scores': scores,
+                'duration_seconds': duration_seconds,
+                'duration_display': duration_display
+            }
+            logger.debug(f"Restored paper search data: {list(result.keys())}")
+            return result
+        
+        # 通常の練習の場合（採用試験、小論文、面接、自由記述、英語読解）
+        else:
+            result = {
+                'type': practice_type,
+                'date': practice_date,
+                'inputs': inputs,
+                'feedback': feedback,
+                'scores': scores,
+                'duration_seconds': duration_seconds,
+                'duration_display': duration_display
+            }
+            logger.debug(f"Restored regular practice data for {practice_type}: inputs keys = {list(inputs.keys()) if isinstance(inputs, dict) else 'Not a dict'}")
+            return result
+    
     def save_practice_history(self, data: Dict[str, Any]) -> bool:
         """練習履歴をデータベースに保存"""
         logger.info(f"save_practice_history called with data keys: {list(data.keys())}")
@@ -87,8 +176,11 @@ class DatabaseManager:
             logger.info(f"Using session_id: {session_id}")
             
             # データベース用にデータを変換
-            inputs_data = data.get('inputs', {})
+            # 練習タイプ別のデータ構造に対応
+            inputs_data = self._extract_inputs_data(data)
             scores_data = data.get('scores', {})
+            
+            logger.info(f"Extracted inputs_data type: {type(inputs_data)}, keys: {list(inputs_data.keys()) if isinstance(inputs_data, dict) else 'Not a dict'}")
             
             # JSON変換を安全に実行
             try:
@@ -204,15 +296,16 @@ class DatabaseManager:
                             except json.JSONDecodeError as e:
                                 logger.error(f"Failed to parse scores JSON: {e}, content: {item['scores']}")
                         
-                        converted_item = {
-                            'type': item['practice_type'],
-                            'date': item['practice_date'],
-                            'inputs': inputs,
-                            'feedback': item['feedback'],
-                            'scores': scores,
-                            'duration_seconds': item['duration_seconds'],
-                            'duration_display': item['duration_display']
-                        }
+                        # 練習タイプに応じてデータ構造を復元
+                        converted_item = self._restore_data_structure(
+                            item['practice_type'],
+                            item['practice_date'],
+                            inputs,
+                            item['feedback'],
+                            scores,
+                            item['duration_seconds'],
+                            item['duration_display']
+                        )
                         history.append(converted_item)
                         
                     except Exception as e:
