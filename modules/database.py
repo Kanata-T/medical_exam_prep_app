@@ -73,6 +73,10 @@ class DatabaseManager:
     def save_practice_history(self, data: Dict[str, Any]) -> bool:
         """練習履歴をデータベースに保存"""
         logger.info(f"save_practice_history called with data keys: {list(data.keys())}")
+        logger.info(f"Data type: {data.get('type')}")
+        logger.info(f"Data date: {data.get('date')}")
+        logger.info(f"Inputs type: {type(data.get('inputs'))}, keys: {list(data.get('inputs', {}).keys()) if isinstance(data.get('inputs'), dict) else 'Not a dict'}")
+        logger.info(f"Scores type: {type(data.get('scores'))}, content: {data.get('scores')}")
         
         if not self.is_available():
             logger.warning("Database not available. Saving to session state only.")
@@ -83,13 +87,32 @@ class DatabaseManager:
             logger.info(f"Using session_id: {session_id}")
             
             # データベース用にデータを変換
+            inputs_data = data.get('inputs', {})
+            scores_data = data.get('scores', {})
+            
+            # JSON変換を安全に実行
+            try:
+                inputs_json = json.dumps(inputs_data, ensure_ascii=False, default=str)
+                logger.info(f"Inputs JSON: {inputs_json[:200]}...")  # 最初の200文字をログ
+            except Exception as e:
+                logger.error(f"Failed to serialize inputs: {e}")
+                inputs_json = json.dumps({}, ensure_ascii=False)
+            
+            try:
+                scores_json = json.dumps(scores_data, ensure_ascii=False, default=str) if scores_data else None
+                if scores_json:
+                    logger.info(f"Scores JSON: {scores_json}")
+            except Exception as e:
+                logger.error(f"Failed to serialize scores: {e}")
+                scores_json = None
+            
             db_data = {
                 'session_id': session_id,
                 'practice_type': data.get('type', ''),
                 'practice_date': data.get('date'),
-                'inputs': json.dumps(data.get('inputs', {}), ensure_ascii=False),
+                'inputs': inputs_json,
                 'feedback': data.get('feedback', ''),
-                'scores': json.dumps(data.get('scores', {}), ensure_ascii=False) if data.get('scores') else None,
+                'scores': scores_json,
                 'duration_seconds': int(data.get('duration_seconds', 0)) if data.get('duration_seconds') is not None else None,
                 'duration_display': data.get('duration_display', '')
             }
@@ -99,14 +122,19 @@ class DatabaseManager:
             
             result = self.client.table('practice_history').insert(db_data).execute()
             
-            logger.info(f"Insert result: {result}")
+            logger.info(f"Insert result status: {hasattr(result, 'data')}")
+            logger.info(f"Insert result data length: {len(result.data) if result.data else 0}")
             
             if result.data:
-                logger.info(f"Successfully saved practice history to database: {len(result.data)} records")
+                inserted_record = result.data[0]
+                logger.info(f"Successfully saved practice history to database: record ID {inserted_record.get('id')}")
+                logger.info(f"Inserted inputs length: {len(inserted_record.get('inputs', ''))}")
+                logger.info(f"Inserted inputs preview: {inserted_record.get('inputs', '')[:100]}...")
                 self.update_last_active()
                 return True
             else:
                 logger.error("Failed to save practice history to database - no data returned")
+                logger.error(f"Supabase error: {getattr(result, 'error', 'No error info')}")
                 return self._save_to_session_state(data)
                 
         except Exception as e:
@@ -158,16 +186,38 @@ class DatabaseManager:
                 # データベース形式から元の形式に変換
                 history = []
                 for item in result.data:
-                    converted_item = {
-                        'type': item['practice_type'],
-                        'date': item['practice_date'],
-                        'inputs': json.loads(item['inputs']) if item['inputs'] else {},
-                        'feedback': item['feedback'],
-                        'scores': json.loads(item['scores']) if item['scores'] else {},
-                        'duration_seconds': item['duration_seconds'],
-                        'duration_display': item['duration_display']
-                    }
-                    history.append(converted_item)
+                    try:
+                        # JSON解析を安全に実行
+                        inputs = {}
+                        if item['inputs']:
+                            try:
+                                inputs = json.loads(item['inputs'])
+                                logger.debug(f"Loaded inputs keys: {list(inputs.keys()) if isinstance(inputs, dict) else 'Not a dict'}")
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse inputs JSON: {e}, content: {item['inputs'][:100]}...")
+                        
+                        scores = {}
+                        if item['scores']:
+                            try:
+                                scores = json.loads(item['scores'])
+                                logger.debug(f"Loaded scores: {scores}")
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse scores JSON: {e}, content: {item['scores']}")
+                        
+                        converted_item = {
+                            'type': item['practice_type'],
+                            'date': item['practice_date'],
+                            'inputs': inputs,
+                            'feedback': item['feedback'],
+                            'scores': scores,
+                            'duration_seconds': item['duration_seconds'],
+                            'duration_display': item['duration_display']
+                        }
+                        history.append(converted_item)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to convert database record: {e}")
+                        continue
                 
                 logger.info(f"Successfully loaded {len(history)} practice history records from database")
                 return history

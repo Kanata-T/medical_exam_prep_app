@@ -266,7 +266,8 @@ def save_history(data):
         
         if success:
             logger.info("History saved successfully via database")
-            return True
+            # データベース保存成功時はダミーファイル名を返す（互換性のため）
+            return f"db_record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         else:
             # フォールバック: ローカルファイル保存
             logger.warning("Database save failed, falling back to local file")
