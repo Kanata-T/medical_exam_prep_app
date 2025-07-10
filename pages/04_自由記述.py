@@ -1,28 +1,68 @@
 import streamlit as st
 from datetime import datetime
-from modules.medical_knowledge_checker import (
-    generate_medical_question,
-    score_medical_answer_stream,
-    get_default_themes,
-    generate_random_medical_theme
-)
-from modules.utils import (
-    check_api_configuration,
-    show_api_setup_guide,
-    save_history,
-    extract_scores,
-    auto_save_session,
-    get_recent_themes,
-    get_theme_history,
-    is_theme_recently_used,
-    render_progress_comparison,
-    save_recent_theme
-)
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import sys
+import os
+
+# パス設定（ページを直接実行した場合の対応）
+try:
+    from modules.medical_knowledge_checker import (
+        generate_medical_question,
+        score_medical_answer_stream,
+        get_default_themes,
+        generate_random_medical_theme
+    )
+except ImportError:
+    # モジュールが見つからない場合、親ディレクトリをパスに追加
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    
+    from modules.medical_knowledge_checker import (
+        generate_medical_question,
+        score_medical_answer_stream,
+        get_default_themes,
+        generate_random_medical_theme
+    )
+
+try:
+    from modules.utils import (
+        check_api_configuration,
+        show_api_setup_guide,
+        save_history,
+        extract_scores,
+        auto_save_session,
+        get_recent_themes,
+        get_theme_history,
+        is_theme_recently_used,
+        render_progress_comparison,
+        save_recent_theme,
+        load_history
+    )
+except ImportError:
+    # utilsモジュールもパスエラーの場合があるため、同様の処理を行う
+    from modules.utils import (
+        check_api_configuration,
+        show_api_setup_guide,
+        save_history,
+        extract_scores,
+        auto_save_session,
+        get_recent_themes,
+        get_theme_history,
+        is_theme_recently_used,
+        render_progress_comparison,
+        save_recent_theme,
+        load_history
+    )
 
 st.set_page_config(
     page_title="医学部採用試験 自由記述対策",
     page_icon="✍️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # --- セッション状態の初期化 ---
@@ -47,10 +87,72 @@ if not api_ok:
     show_api_setup_guide()
     st.stop()
 
+# --- 履歴データの処理 ---
+@st.cache_data(ttl=60)  # キャッシュ時間を短縮
+def load_and_process_free_writing_history():
+    """自由記述の履歴データを読み込んで処理"""
+    try:
+        history_data = load_history()
+        if not history_data:
+            return []
+        
+        # 自由記述の履歴のみを抽出
+        free_writing_history = []
+        for item in history_data:
+            if item.get('type') == '医学部採用試験 自由記述':
+                free_writing_history.append(item)
+        
+        # 日付順でソート（新しい順）
+        free_writing_history.sort(key=lambda x: x.get('date', ''), reverse=True)
+        return free_writing_history
+    except Exception as e:
+        st.error(f"履歴データの読み込みエラー: {e}")
+        return []
+
+def get_themes_with_stats():
+    """テーマ別の統計情報を取得"""
+    history = load_and_process_free_writing_history()
+    if not history:
+        return {}
+    
+    themes_stats = {}
+    for item in history:
+        theme = item.get('inputs', {}).get('theme', '不明')
+        if theme not in themes_stats:
+            themes_stats[theme] = {
+                'count': 0,
+                'scores': [],
+                'dates': [],
+                'last_date': None,
+                'avg_score': 0,
+                'latest_feedback': ''
+            }
+        
+        themes_stats[theme]['count'] += 1
+        themes_stats[theme]['dates'].append(item.get('date', ''))
+        
+        # スコア情報
+        scores = item.get('scores', {})
+        if scores:
+            avg_score = sum(scores.values()) / len(scores)
+            themes_stats[theme]['scores'].append(avg_score)
+        
+        # 最新の学習日時
+        date_str = item.get('date', '')
+        if not themes_stats[theme]['last_date'] or date_str > themes_stats[theme]['last_date']:
+            themes_stats[theme]['last_date'] = date_str
+            themes_stats[theme]['latest_feedback'] = item.get('feedback', '')
+    
+    # 平均スコアを計算
+    for theme_data in themes_stats.values():
+        if theme_data['scores']:
+            theme_data['avg_score'] = sum(theme_data['scores']) / len(theme_data['scores'])
+    
+    return themes_stats
+
 # --- UIコンポーネント ---
 def render_theme_selection():
     """テーマ選択画面を表示"""
-    st.header("✍️ 医学部採用試験 自由記述対策")
     st.markdown("医学部採用試験で実際に出題される形式の自由記述問題で対策を行います。")
     
     # 医学部採用試験の特徴を説明
@@ -155,41 +257,49 @@ def render_theme_selection():
             # 通常のテーマ選択ボタン
             # テーマを分類して表示
             themes_by_category = {
-                "内科系": ["多発性骨髄腫", "急性腎不全", "ネフローゼ症候群", "慢性骨髄性白血病", "再生不良性貧血", "COPD", "C型肝炎", "プロラクチノーマ"],
-                "外科・外傷系": ["胆石性閉塞性胆管炎", "下肢閉塞性動脈硬化症", "マルファン症候群", "乳癌", "心臓粘液腫"],
-                "小児・産婦人科": ["川崎病", "神経発達障害", "新生児マススクリーニング", "双体妊娠"],
-                "整形・循環器他": ["大腿骨頸部骨折", "大腿骨頭置換術", "心筋梗塞", "不整脈", "敗血症性ショック", "糖尿病性ケトアシドース"]
+                "循環器系": ["心筋梗塞", "不整脈", "心房細動", "狭心症", "大動脈解離", "心サルコイドーシス", "心アミロイドーシス", "重症大動脈弁狭窄症"],
+                "内分泌・代謝": ["糖尿病の診断基準", "糖尿病の三大合併症", "糖尿病性ケトアシドース", "Cushing症候群", "甲状腺機能亢進症", "ステロイドの副作用"],
+                "血液・腎臓": ["多発性骨髄腫", "慢性骨髄性白血病", "急性骨髄性白血病", "悪性リンパ腫", "再生不良性貧血", "急性腎不全", "ネフローゼ症候群"],
+                "呼吸器・消化器": ["COPD", "Pancoast症候群", "肺癌の治療", "誤嚥性肺炎", "C型肝炎", "胆石性閉塞性胆管炎", "ヘリコバクターピロリ感染"],
+                "外科・整形": ["下肢閉塞性動脈硬化症", "マルファン症候群", "交通外傷", "乳癌", "橈骨遠位端骨折", "変形性膝関節症", "高齢者の骨折"],
+                "産婦人科・小児": ["母子感染症", "子宮内膜症", "稽留流産", "切迫早産", "川崎病", "小児の解熱薬使用", "熱性けいれん"],
+                "救急・麻酔": ["敗血症性ショック", "突然の腹痛", "胸痛の鑑別疾患", "アナフィラキシー", "BLS", "全身麻酔"]
             }
             
             for category, themes in themes_by_category.items():
                 st.markdown(f"**{category}**")
-                cols = st.columns(4)
-                for i, theme in enumerate(themes):
-                    if theme in default_themes:  # 存在確認
-                        with cols[i % 4]:
-                            # 最近使用したテーマかどうかの表示
-                            recently_used = is_theme_recently_used("自由記述", theme, 5)
-                            theme_history = get_theme_history("自由記述", theme)
-                            
-                            # ボタンの表示テキストとスタイル
-                            button_text = theme
-                            if recently_used:
-                                button_text += " 🔄"
-                            elif theme_history:
-                                button_text += f" 📊({len(theme_history)}回)"
-                            
-                            button_type = "secondary" if recently_used else "primary"
-                            
-                            if st.button(button_text, use_container_width=True, key=f"theme_{theme}", type=button_type):
+                # カテゴリ内のテーマ数に応じてcolumns数を調整（最大4列）
+                num_cols = min(4, len([t for t in themes if t in default_themes]))
+                if num_cols > 0:
+                    cols = st.columns(num_cols)
+                    col_idx = 0
+                    for theme in themes:
+                        if theme in default_themes:  # 存在確認
+                            with cols[col_idx % num_cols]:
+                                # 最近使用したテーマかどうかの表示
+                                recently_used = is_theme_recently_used("自由記述", theme, 5)
+                                theme_history = get_theme_history("自由記述", theme)
+                                
+                                # ボタンの表示テキストとスタイル
+                                button_text = theme
                                 if recently_used:
-                                    # 最近使用したテーマの場合は確認状態にセット
-                                    st.session_state.pending_theme_confirmation = theme
-                                    st.rerun()
-                                else:
-                                    s['theme'] = theme
-                                    save_recent_theme(theme)
-                                    s['step'] = 'generating_question'
-                                    st.rerun()
+                                    button_text += " 🔄"
+                                elif theme_history:
+                                    button_text += f" 📊({len(theme_history)}回)"
+                                
+                                button_type = "secondary" if recently_used else "primary"
+                                
+                                if st.button(button_text, use_container_width=True, key=f"theme_{theme}", type=button_type):
+                                    if recently_used:
+                                        # 最近使用したテーマの場合は確認状態にセット
+                                        st.session_state.pending_theme_confirmation = theme
+                                        st.rerun()
+                                    else:
+                                        s['theme'] = theme
+                                        save_recent_theme(theme)
+                                        s['step'] = 'generating_question'
+                                        st.rerun()
+                            col_idx += 1
                 st.markdown("")  # 間隔追加
 
         st.markdown("<hr>", unsafe_allow_html=True)
@@ -233,8 +343,7 @@ def render_question_generation():
 
 def render_answering_screen():
     """回答入力画面を表示"""
-    st.header(f"📝 医学部採用試験 自由記述問題")
-    st.subheader(f"テーマ: {s['theme']}")
+    st.subheader(f"📝 テーマ: {s['theme']}")
     
     # 問題タイプの判定と表示
     question_type = "基本知識型"
@@ -314,7 +423,7 @@ def render_answering_screen():
 
 def render_scoring_and_feedback():
     """採点とフィードバック表示画面"""
-    st.header("📊 医学部採用試験基準での評価")
+    st.subheader("📊 医学部採用試験基準での評価")
 
     with st.spinner("医学部採用試験の採点委員が評価中..."):
         stream = score_medical_answer_stream(s['question'], s['answer'])
@@ -368,7 +477,7 @@ def render_scoring_and_feedback():
 
 def render_completed_screen():
     """完了画面を表示"""
-    st.header("🎉 医学部採用試験基準での評価完了")
+    st.subheader("🎉 医学部採用試験基準での評価完了")
     
     with st.container(border=True):
         st.markdown(s['feedback'])
@@ -396,33 +505,264 @@ def render_completed_screen():
             rec_cols = st.columns(min(4, len(recommended_themes)))
             for i, rec_theme in enumerate(recommended_themes[:4]):
                 with rec_cols[i]:
-                    if st.button(f"📚 {rec_theme}", use_container_width=True):
+                    if st.button(f"📚 {rec_theme}", use_container_width=True, key=f"recommend_{rec_theme}"):
+                        # 状態を完全にリセットしてから新しいテーマを設定
                         s['theme'] = rec_theme
                         save_recent_theme(rec_theme)
                         s['step'] = 'generating_question'
                         s['answer'] = ""
                         s['feedback'] = None
+                        s['question'] = ""
+                        s['start_time'] = None
+                        # 確認状態もリセット
+                        if 'pending_theme_confirmation' in st.session_state:
+                            st.session_state.pending_theme_confirmation = None
                         st.rerun()
         else:
             st.info("すべての頻出テーマを最近練習済みです。ランダムテーマをお試しください。")
     
     if st.button("新しい医学部採用試験問題に挑戦", type="primary"):
-        # Reset for next round
-        initialize_session()
+        # セッション状態を完全にリセット
+        s['step'] = 'theme_selection'
+        s['theme'] = ""
+        s['question'] = ""
+        s['answer'] = ""
+        s['feedback'] = None
+        s['start_time'] = None
+        # 確認状態もリセット
+        if 'pending_theme_confirmation' in st.session_state:
+            st.session_state.pending_theme_confirmation = None
         st.rerun()
+
+# --- 履歴表示のUIコンポーネント ---
+def render_history_overview():
+    """履歴概要を表示"""
+    st.markdown("これまでの自由記述練習の履歴を確認できます。")
+    
+    # 履歴更新ボタン
+    col1, col2 = st.columns([4, 1])
+    with col2:
+        if st.button("🔄 履歴更新", help="履歴データを最新の状態に更新します"):
+            st.cache_data.clear()
+            st.rerun()
+    
+    history = load_and_process_free_writing_history()
+    if not history:
+        st.info("📝 まだ自由記述の履歴がありません。新しい練習タブで練習を始めてください。")
+        return
+    
+    themes_stats = get_themes_with_stats()
+    
+    # 統計サマリー
+    st.subheader("📊 学習サマリー")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("総練習回数", len(history))
+    
+    with col2:
+        st.metric("練習したテーマ数", len(themes_stats))
+    
+    with col3:
+        if themes_stats:
+            all_scores = []
+            for stats in themes_stats.values():
+                all_scores.extend(stats['scores'])
+            avg_score = sum(all_scores) / len(all_scores) if all_scores else 0
+            st.metric("平均スコア", f"{avg_score:.1f}")
+        else:
+            st.metric("平均スコア", "N/A")
+    
+    with col4:
+        # 今月の練習回数
+        current_month = datetime.now().strftime('%Y-%m')
+        this_month_count = sum(1 for item in history if item.get('date', '').startswith(current_month))
+        st.metric("今月の練習", f"{this_month_count}回")
+
+def render_theme_history():
+    """テーマ別履歴を表示"""
+    st.subheader("🎯 テーマ別学習履歴")
+    
+    themes_stats = get_themes_with_stats()
+    if not themes_stats:
+        st.info("まだテーマ別の履歴がありません。")
+        return
+    
+    # テーマ選択
+    theme_options = list(themes_stats.keys())
+    theme_options.sort(key=lambda x: themes_stats[x]['last_date'], reverse=True)
+    
+    selected_theme = st.selectbox(
+        "📋 テーマを選択",
+        theme_options,
+        format_func=lambda x: f"{x} ({themes_stats[x]['count']}回練習, 平均スコア: {themes_stats[x]['avg_score']:.1f})"
+    )
+    
+    if selected_theme:
+        render_theme_detail(selected_theme, themes_stats[selected_theme])
+
+def render_theme_detail(theme, stats):
+    """選択されたテーマの詳細履歴を表示"""
+    st.markdown(f"### 📖 テーマ: {theme}")
+    
+    # 基本統計
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("練習回数", stats['count'])
+    with col2:
+        st.metric("平均スコア", f"{stats['avg_score']:.1f}" if stats['avg_score'] > 0 else "N/A")
+    with col3:
+        try:
+            last_date = datetime.fromisoformat(stats['last_date']).strftime('%Y年%m月%d日') if stats['last_date'] else "不明"
+        except (ValueError, TypeError):
+            last_date = "不明"
+        st.metric("最後の練習", last_date)
+    
+    # スコア推移グラフ
+    if len(stats['scores']) > 1:
+        st.markdown("#### 📈 スコア推移")
+        try:
+            # 日付のパースを安全に行う
+            dates = []
+            for date in stats['dates'][:len(stats['scores'])]:
+                try:
+                    dates.append(datetime.fromisoformat(date).date())
+                except (ValueError, TypeError):
+                    # パースできない日付は現在日時を使用
+                    dates.append(datetime.now().date())
+            
+            fig = px.line(
+                x=dates,
+                y=stats['scores'],
+                title=f"「{theme}」のスコア推移",
+                labels={'x': '練習日', 'y': 'スコア'}
+            )
+            fig.update_traces(line=dict(width=3, color='#667eea'))
+            fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                yaxis=dict(range=[0, 10.5])
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"グラフの表示中にエラーが発生しました: {e}")
+            st.info("スコア推移グラフを表示できませんでした。")
+    
+    # 詳細履歴
+    st.markdown("#### 📝 練習履歴詳細")
+    history = load_and_process_free_writing_history()
+    theme_history = [item for item in history if item.get('inputs', {}).get('theme') == theme]
+    
+    for i, item in enumerate(theme_history):
+        try:
+            date = datetime.fromisoformat(item['date']).strftime('%Y年%m月%d日 %H:%M')
+        except (ValueError, TypeError, KeyError):
+            date = "日時不明"
+        duration = item.get('duration_display', '未記録')
+        
+        with st.expander(f"📅 {date} ({duration})", expanded=i==0):
+            # 問題
+            question = item.get('inputs', {}).get('question', '問題が記録されていません')
+            st.markdown("**出題された問題:**")
+            st.markdown(f"> {question}")
+            
+            # 回答
+            answer = item.get('inputs', {}).get('answer', '回答が記録されていません')
+            st.markdown("**あなたの回答:**")
+            with st.container(border=True):
+                st.markdown(answer)
+            
+            # スコア
+            scores = item.get('scores', {})
+            if scores:
+                st.markdown("**評価スコア:**")
+                score_cols = st.columns(len(scores))
+                for j, (category, score) in enumerate(scores.items()):
+                    with score_cols[j]:
+                        st.metric(category, f"{score}/10")
+            
+            # フィードバック
+            feedback = item.get('feedback', '')
+            if feedback:
+                st.markdown("**詳細評価:**")
+                st.markdown(feedback)
+
+def render_recent_activity():
+    """最近の活動を表示"""
+    st.subheader("🕒 最近の活動")
+    
+    history = load_and_process_free_writing_history()
+    if not history:
+        st.info("最近の活動はありません。")
+        return
+    
+    # 最新5件を表示
+    recent_items = history[:5]
+    
+    for item in recent_items:
+        try:
+            date = datetime.fromisoformat(item['date']).strftime('%Y年%m月%d日 %H:%M')
+        except (ValueError, TypeError, KeyError):
+            date = "日時不明"
+        theme = item.get('inputs', {}).get('theme', '不明')
+        duration = item.get('duration_display', '未記録')
+        
+        # スコアの計算
+        scores = item.get('scores', {})
+        avg_score = sum(scores.values()) / len(scores) if scores else 0
+        score_text = f"平均スコア: {avg_score:.1f}" if avg_score > 0 else "スコア未記録"
+        
+        with st.container(border=True):
+            col1, col2, col3 = st.columns([3, 2, 2])
+            with col1:
+                st.markdown(f"**{theme}**")
+                st.caption(f"📅 {date}")
+            with col2:
+                st.markdown(f"⏱️ {duration}")
+                st.caption("所要時間")
+            with col3:
+                st.markdown(f"📊 {score_text}")
+                if avg_score >= 8:
+                    st.caption("🌟 優秀")
+                elif avg_score >= 6:
+                    st.caption("👍 良好")
+                elif avg_score > 0:
+                    st.caption("📈 要改善")
 
 # --- メインロジック ---
 def main():
-    if s['step'] == 'theme_selection':
-        render_theme_selection()
-    elif s['step'] == 'generating_question':
-        render_question_generation()
-    elif s['step'] == 'answering':
-        render_answering_screen()
-    elif s['step'] == 'scoring':
-        render_scoring_and_feedback()
-    elif s['step'] == 'completed':
-        render_completed_screen()
+    st.header("✍️ 医学部採用試験 自由記述対策")
+    
+    # タブの作成
+    tab1, tab2 = st.tabs(["🆕 新しい練習", "📚 履歴"])
+    
+    with tab1:
+        # 既存のメインフロー
+        if s['step'] == 'theme_selection':
+            render_theme_selection()
+        elif s['step'] == 'generating_question':
+            render_question_generation()
+        elif s['step'] == 'answering':
+            render_answering_screen()
+        elif s['step'] == 'scoring':
+            render_scoring_and_feedback()
+        elif s['step'] == 'completed':
+            render_completed_screen()
+    
+    with tab2:
+        # 履歴表示
+        render_history_overview()
+        
+        st.markdown("---")
+        
+        # タブで履歴の詳細を分ける
+        history_tab1, history_tab2 = st.tabs(["🎯 テーマ別履歴", "🕒 最近の活動"])
+        
+        with history_tab1:
+            render_theme_history()
+        
+        with history_tab2:
+            render_recent_activity()
 
 if __name__ == "__main__":
     main()

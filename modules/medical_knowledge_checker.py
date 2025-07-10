@@ -192,6 +192,49 @@ def score_medical_answer_stream(question: str, answer: str):
         logger.error(f"Error scoring medical answer: {e}")
         return _create_error_stream(e)
 
+def _is_theme_similar(theme1: str, theme2: str) -> bool:
+    """
+    2つのテーマが類似しているかをチェックします。
+    
+    Args:
+        theme1 (str): 比較するテーマ1
+        theme2 (str): 比較するテーマ2
+    
+    Returns:
+        bool: 類似している場合True
+    """
+    # 正規化（空白除去、小文字化）
+    t1 = theme1.replace(" ", "").replace("　", "").lower()
+    t2 = theme2.replace(" ", "").replace("　", "").lower()
+    
+    # 完全一致
+    if t1 == t2:
+        return True
+    
+    # 部分一致（より短い方が長い方に含まれる場合）
+    if len(t1) >= 3 and len(t2) >= 3:  # 3文字以上の場合のみ部分一致を検査
+        if t1 in t2 or t2 in t1:
+            return True
+    
+    # 類似パターンの定義
+    similar_patterns = [
+        ["敗血症", "敗血症性ショック"],
+        ["心筋梗塞", "急性心筋梗塞", "心筋梗塞症"],
+        ["腎不全", "急性腎不全", "慢性腎不全"],
+        ["肺炎", "誤嚥性肺炎", "細菌性肺炎"],
+        ["糖尿病", "糖尿病の診断基準", "糖尿病性ケトアシドース", "糖尿病の三大合併症"],
+        ["骨折", "大腿骨頸部骨折", "橈骨遠位端骨折", "椎体骨折"],
+        ["乳癌", "乳癌の治療法"],
+        ["白血病", "急性骨髄性白血病", "慢性骨髄性白血病", "急性前骨髄球性白血病"]
+    ]
+    
+    # 類似パターンでのチェック
+    for pattern in similar_patterns:
+        if theme1 in pattern and theme2 in pattern:
+            return True
+    
+    return False
+
 @retry.Retry()
 def generate_random_medical_theme(avoid_themes: list = None) -> str:
     """
@@ -203,16 +246,25 @@ def generate_random_medical_theme(avoid_themes: list = None) -> str:
     Returns:
         str: 生成されたテーマ
     """
-    avoid_themes_text = ""
-    if avoid_themes and len(avoid_themes) > 0:
-        avoid_themes_text = f"""
-**重要な制約**: 以下のテーマは最近出題されているため、必ず避けてください：
+    if not avoid_themes:
+        avoid_themes = []
+    
+    max_attempts = 8  # 最大試行回数を増加
+    
+    for attempt in range(max_attempts):
+        avoid_themes_text = ""
+        if avoid_themes and len(avoid_themes) > 0:
+            avoid_themes_text = f"""
+**重要な制約**: 以下のテーマ及び類似するテーマは最近出題されているため、必ず避けてください：
 {', '.join(avoid_themes)}
 
-上記のテーマとは異なる、新しいテーマを提案してください。
+例: 「敗血症性ショック」が含まれる場合、「敗血症」「ショック」も避けてください
+例: 「糖尿病の診断基準」が含まれる場合、「糖尿病」「糖尿病性ケトアシドース」も避けてください
+
+上記のテーマとは明確に異なる、まったく新しい分野のテーマを提案してください。
 """
-    
-    prompt = f"""
+        
+        prompt = f"""
 あなたは医学部採用試験の問題作成委員です。
 医学部採用試験の自由記述問題で実際に出題される可能性の高い、医学的テーマを1つだけ提案してください。
 
@@ -224,29 +276,71 @@ def generate_random_medical_theme(avoid_themes: list = None) -> str:
 - 診断・治療に関する実践的知識が問われる疾患
 - 患者説明や同僚との情報共有が必要な疾患
 
-# 出題されやすい分野例
-- 内科系：血液疾患、腎疾患、呼吸器疾患、消化器疾患、内分泌疾患
-- 外科系：外傷、腫瘍、血管疾患
-- 小児科：先天性疾患、感染症、発達障害
-- 産婦人科：妊娠合併症、生殖器疾患
-- 整形外科：骨折、関節疾患
-- 救急：ショック、中毒、外傷
+# 出題されやすい分野例（避けるべきテーマと重複しない分野から選択）
+- 内科系：感染症、免疫疾患、代謝疾患、内分泌疾患
+- 外科系：腫瘍、血管疾患、外傷
+- 精神科：認知症、うつ病、統合失調症
+- 皮膚科：アトピー性皮膚炎、悪性黒色腫
+- 眼科：緑内障、白内障、糖尿病網膜症
+- 耳鼻咽喉科：突発性難聴、メニエール病
+- 泌尿器科：前立腺肥大症、腎結石
+- 婦人科：子宮筋腫、卵巣嚢腫
 
 # 要件
 1. 疾患名は正確な医学用語を使用
 2. 医学部採用試験で実際に出題される可能性が高いもの
 3. 単一の明確な疾患・病態名
 4. 研修医レベルで理解すべき重要度の高いもの
+5. 避けるべきテーマとは明確に異なる分野のもの
 
 テーマ名のみを簡潔に出力してください。
 """
-    try:
-        client = _get_gemini_client()
-        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"Error generating random medical theme: {e}")
-        return "ランダムなテーマの生成中にエラーが発生しました。"
+        
+        try:
+            client = _get_gemini_client()
+            response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            generated_theme = response.text.strip()
+            
+            # 生成されたテーマが回避リストと類似していないかチェック
+            is_similar = False
+            for avoid_theme in avoid_themes:
+                if _is_theme_similar(generated_theme, avoid_theme):
+                    is_similar = True
+                    break
+            
+            if not is_similar:
+                return generated_theme
+            else:
+                logger.info(f"Generated theme '{generated_theme}' is similar to avoided themes. Retrying... (attempt {attempt + 1})")
+                continue
+                
+        except Exception as e:
+            logger.error(f"Error generating random medical theme (attempt {attempt + 1}): {e}")
+            continue
+    
+    # 最大試行回数に達した場合のフォールバック
+    logger.warning("Max attempts reached for theme generation. Using fallback theme.")
+    
+    # 避けるべきテーマと重複しないフォールバックテーマのリスト
+    fallback_themes = [
+        "緑内障", "白内障", "メニエール病", "突発性難聴", "前立腺肥大症", 
+        "子宮筋腫", "卵巣嚢腫", "アトピー性皮膚炎", "悪性黒色腫", "認知症",
+        "うつ病", "統合失調症", "腎結石", "尿路感染症", "甲状腺癌",
+        "パーキンソン病", "筋萎縮性側索硬化症", "多発性硬化症", "てんかん"
+    ]
+    
+    # フォールバックテーマからも類似していないものを選択
+    for fallback_theme in fallback_themes:
+        is_similar = False
+        for avoid_theme in avoid_themes:
+            if _is_theme_similar(fallback_theme, avoid_theme):
+                is_similar = True
+                break
+        
+        if not is_similar:
+            return fallback_theme
+    
+    return "フォールバックテーマの生成中にエラーが発生しました。"
 
 def get_default_themes():
     """
@@ -254,40 +348,96 @@ def get_default_themes():
     実際の過去問に基づいた実践的なテーマを収録。
     """
     return [
-        # 内科系（頻出）
-        "多発性骨髄腫",
-        "急性腎不全", 
-        "ネフローゼ症候群",
-        "慢性骨髄性白血病",
-        "再生不良性貧血",
-        "COPD",
-        "C型肝炎",
+        # 循環器系
+        "心筋梗塞",
+        "不整脈",
+        "心房細動",
+        "狭心症",
+        "大動脈解離",
+        "心サルコイドーシス",
+        "心アミロイドーシス",
+        "重症大動脈弁狭窄症",
+        "心臓リハビリテーション",
+        "心臓粘液腫",
+        
+        # 内分泌・代謝系
+        "糖尿病の診断基準",
+        "糖尿病の三大合併症",
+        "糖尿病性ケトアシドース",
+        "Cushing症候群",
+        "甲状腺機能亢進症",
+        "ステロイドの副作用",
         "プロラクチノーマ",
         
-        # 外科・外傷系
+        # 血液系
+        "多発性骨髄腫",
+        "慢性骨髄性白血病",
+        "急性骨髄性白血病",
+        "急性前骨髄球性白血病",
+        "悪性リンパ腫",
+        "再生不良性貧血",
+        
+        # 腎・泌尿器系
+        "急性腎不全",
+        "ネフローゼ症候群",
+        
+        # 呼吸器系
+        "COPD",
+        "Pancoast症候群",
+        "肺癌の治療",
+        "誤嚥性肺炎",
+        
+        # 消化器系
+        "C型肝炎",
         "胆石性閉塞性胆管炎",
+        "ヘリコバクターピロリ感染",
+        "肝切除と乳酸値上昇",
+        "腹膜炎",
+        "急性胆嚢炎",
+        "肝細胞癌",
+        
+        # 外科・外傷系
         "下肢閉塞性動脈硬化症",
         "マルファン症候群",
+        "交通外傷",
+        
+        # 乳腺外科
         "乳癌",
-        "心臓粘液腫",
+        "乳癌の治療法",
+        
+        # 整形外科系
+        "大腿骨頸部骨折",
+        "大腿骨頭置換術",
+        "橈骨遠位端骨折",
+        "椎体骨折",
+        "変形性膝関節症",
+        "高齢者の骨折",
+        
+        # 産婦人科系
+        "双体妊娠",
+        "母子感染症",
+        "子宮内膜症",
+        "稽留流産",
+        "切迫早産",
+        "妊娠糖尿病",
+        "胎児発育不全",
+        "分娩の三要素",
         
         # 小児科系
         "川崎病",
         "神経発達障害",
         "新生児マススクリーニング",
+        "小児の解熱薬使用",
+        "熱性けいれん",
         
-        # 産婦人科系
-        "双体妊娠",
-        
-        # 整形外科系
-        "大腿骨頸部骨折",
-        "大腿骨頭置換術",
-        
-        # 循環器系
-        "心筋梗塞",
-        "不整脈",
-        
-        # その他重要疾患
+        # 救急医学
         "敗血症性ショック",
-        "糖尿病性ケトアシドース"
+        "突然の腹痛",
+        "胸痛の鑑別疾患",
+        "口渇と体重減少",
+        "アナフィラキシー",
+        "BLS",
+        
+        # 麻酔科
+        "全身麻酔"
     ]
