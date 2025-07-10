@@ -92,6 +92,17 @@ if not api_ok:
 def load_and_process_free_writing_history():
     """自由記述の履歴データを読み込んで処理"""
     try:
+        # 新しいデータベースマネージャーを使用
+        from modules.database import db_manager
+        return db_manager.load_practice_history('医学部採用試験 自由記述')
+        
+    except ImportError:
+        # フォールバック: 従来の方法
+        return _load_free_writing_history_local()
+
+def _load_free_writing_history_local():
+    """フォールバック: ローカルファイルから自由記述履歴を読み込み"""
+    try:
         history_data = load_history()
         if not history_data:
             return []
@@ -539,12 +550,46 @@ def render_history_overview():
     """履歴概要を表示"""
     st.markdown("これまでの自由記述練習の履歴を確認できます。")
     
-    # 履歴更新ボタン
-    col1, col2 = st.columns([4, 1])
+    # データベース状況とコントロール
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        # データベース接続状況を表示
+        try:
+            from modules.database import db_manager
+            status = db_manager.get_database_status()
+            
+            if status['available']:
+                st.success(f"🌐 **データベース接続**: 正常 (ID: {status['session_id'][:8]}...)")
+                if status.get('database_records'):
+                    st.caption(f"📊 データベース内履歴: {status['database_records']}件")
+            else:
+                st.warning("⚠️ **データベース接続**: オフライン")
+                if status['offline_records']:
+                    st.caption(f"📱 オフライン履歴: {status['offline_records']}件")
+                    
+        except ImportError:
+            st.info("📱 **履歴保存**: ローカルファイル使用")
+    
     with col2:
         if st.button("🔄 履歴更新", help="履歴データを最新の状態に更新します"):
             st.cache_data.clear()
             st.rerun()
+    
+    with col3:
+        # 履歴エクスポートボタン
+        try:
+            from modules.database import db_manager
+            if st.button("💾 履歴保存", help="履歴をJSONファイルとして保存"):
+                export_data = db_manager.export_history('医学部採用試験 自由記述')
+                st.download_button(
+                    label="📥 履歴ダウンロード",
+                    data=export_data,
+                    file_name=f"自由記述履歴_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
+        except ImportError:
+            pass
     
     history = load_and_process_free_writing_history()
     if not history:

@@ -249,7 +249,41 @@ def safe_api_call(func, *args, **kwargs):
         return False, error_msg
 
 def save_history(data):
-    """Saves a record to the history directory."""
+    """Saves a record to the database or local directory as fallback."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"save_history called with data type: {data.get('type', 'Unknown')}")
+    logger.info(f"save_history data keys: {list(data.keys())}")
+    
+    try:
+        # 新しいデータベースマネージャーを使用
+        from modules.database import db_manager
+        logger.info("Calling db_manager.save_practice_history...")
+        success = db_manager.save_practice_history(data)
+        
+        logger.info(f"db_manager.save_practice_history returned: {success}")
+        
+        if success:
+            logger.info("History saved successfully via database")
+            return True
+        else:
+            # フォールバック: ローカルファイル保存
+            logger.warning("Database save failed, falling back to local file")
+            return _save_history_local(data)
+            
+    except ImportError as e:
+        # データベースモジュールが利用できない場合はローカル保存
+        logger.error(f"ImportError: {e}, falling back to local save")
+        return _save_history_local(data)
+    except Exception as e:
+        logger.error(f"Unexpected error in save_history: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return _save_history_local(data)
+
+def _save_history_local(data):
+    """Saves a record to the local history directory (fallback)."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = os.path.join(HISTORY_DIR, f"{timestamp}.json")
     try:
@@ -261,7 +295,18 @@ def save_history(data):
         return None
 
 def load_history():
-    """Loads all history records."""
+    """Loads all history records from database or local directory as fallback."""
+    try:
+        # 新しいデータベースマネージャーを使用
+        from modules.database import db_manager
+        return db_manager.load_practice_history()
+        
+    except ImportError:
+        # データベースモジュールが利用できない場合はローカルファイル読み込み
+        return _load_history_local()
+
+def _load_history_local():
+    """Loads all history records from local directory (fallback)."""
     if not os.path.exists(HISTORY_DIR):
         return []
     history_files = sorted([f for f in os.listdir(HISTORY_DIR) if f.endswith('.json')], reverse=True)
@@ -562,7 +607,18 @@ def get_recent_themes(practice_type: str, limit: int = 5) -> list:
         list: 最近使用されたテーマのリスト
     """
     try:
-        history = load_history()
+        # 新しいデータベースマネージャーを使用
+        from modules.database import db_manager
+        return db_manager.get_recent_themes(practice_type, limit)
+        
+    except ImportError:
+        # フォールバック: 従来の方法
+        return _get_recent_themes_local(practice_type, limit)
+
+def _get_recent_themes_local(practice_type: str, limit: int = 5) -> list:
+    """フォールバック: ローカルファイルから最近のテーマを取得"""
+    try:
+        history = _load_history_local()
         recent_themes = []
         
         for item in history:
@@ -590,7 +646,18 @@ def get_theme_history(practice_type: str, theme: str) -> list:
         list: 過去の成績データのリスト（日付の新しい順）
     """
     try:
-        history = load_history()
+        # 新しいデータベースマネージャーを使用
+        from modules.database import db_manager
+        return db_manager.get_theme_history(practice_type, theme)
+        
+    except ImportError:
+        # フォールバック: 従来の方法
+        return _get_theme_history_local(practice_type, theme)
+
+def _get_theme_history_local(practice_type: str, theme: str) -> list:
+    """フォールバック: ローカルファイルからテーマ履歴を取得"""
+    try:
+        history = _load_history_local()
         theme_history = []
         
         for item in history:
@@ -627,8 +694,15 @@ def is_theme_recently_used(practice_type: str, theme: str, recent_limit: int = 3
     Returns:
         bool: 最近使用されている場合True
     """
-    recent_themes = get_recent_themes(practice_type, recent_limit)
-    return theme in recent_themes
+    try:
+        # 新しいデータベースマネージャーを使用
+        from modules.database import db_manager
+        return db_manager.is_theme_recently_used(practice_type, theme, recent_limit)
+        
+    except ImportError:
+        # フォールバック: 従来の方法
+        recent_themes = _get_recent_themes_local(practice_type, recent_limit)
+        return theme in recent_themes
 
 def calculate_progress_stats(theme_history: list) -> dict:
     """

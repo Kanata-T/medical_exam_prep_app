@@ -264,18 +264,103 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# データの読み込み
+# データベース接続状況表示
+try:
+    from modules.database import db_manager
+    status = db_manager.get_database_status()
+    
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        if status['available']:
+            st.success(f"🌐 **データベース接続**: 正常 (ID: {status['session_id'][:8]}...)")
+            if status.get('database_records'):
+                st.caption(f"📊 データベース内履歴: {status['database_records']}件")
+        else:
+            st.warning("⚠️ **データベース接続**: オフライン")
+            if status['offline_records']:
+                st.caption(f"📱 オフライン履歴: {status['offline_records']}件")
+    
+    with col2:
+        if st.button("🔄 履歴更新", help="履歴データを最新の状態に更新"):
+            st.cache_data.clear()
+            st.rerun()
+    
+    with col3:
+        # 履歴エクスポートボタン
+        if st.button("💾 全履歴保存", help="全履歴をJSONファイルとして保存"):
+            if history:
+                export_data = json.dumps(history, ensure_ascii=False, indent=2)
+                st.download_button(
+                    label="📥 履歴ダウンロード",
+                    data=export_data,
+                    file_name=f"全学習履歴_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
+            else:
+                st.warning("ダウンロードする履歴がありません")
+                
+except ImportError:
+    st.info("📱 **履歴保存**: ローカルファイル使用")
+
+st.markdown("---")
+
+# データの読み込み（Supabase対応）
 @st.cache_data(ttl=300)
 def load_and_process_history():
-    history_data = load_history()
-    if not history_data:
-        return None, pd.DataFrame(), pd.DataFrame()
+    """全練習タイプの履歴をSupabaseまたはローカルから読み込み"""
+    try:
+        # Supabaseから全ての履歴を取得
+        from modules.database import db_manager
+        
+        # 全練習タイプの履歴を統合取得
+        practice_types = [
+            '採用試験',
+            '過去問スタイル採用試験',  
+            '小論文対策',
+            '面接対策(単発)',
+            '面接対策(セッション)',
+            '医学部採用試験 自由記述',
+            '英語読解',
+            '過去問スタイル英語読解'
+        ]
+        
+        all_history = []
+        for practice_type in practice_types:
+            try:
+                practice_history = db_manager.load_practice_history(practice_type)
+                all_history.extend(practice_history)
+            except Exception as e:
+                # 特定の練習タイプでエラーが発生しても他は続行
+                st.warning(f"⚠️ {practice_type}の履歴取得中にエラー: {e}")
+                continue
+        
+        # 日付順でソート（新しい順）
+        all_history.sort(key=lambda x: x.get('date', ''), reverse=True)
+        
+        if not all_history:
+            return None, pd.DataFrame(), pd.DataFrame()
+            
+        return all_history, _process_to_dataframes(all_history)
+        
+    except ImportError:
+        # フォールバック: 従来のローカルファイル読み込み
+        history_data = load_history()
+        if not history_data:
+            return None, pd.DataFrame(), pd.DataFrame()
+        return history_data, _process_to_dataframes(history_data)
 
+def _process_to_dataframes(history_data):
+    """履歴データをDataFrameに変換"""
     df_data = []
     score_data = []
     
     for item in history_data:
-        date = pd.to_datetime(item['date'])
+        try:
+            date = pd.to_datetime(item['date'])
+        except (ValueError, TypeError, KeyError):
+            # 日付パースエラーの場合は現在時刻を使用
+            date = pd.to_datetime('now')
+            
         item_type = item.get('type', '不明')
         duration_seconds = item.get('duration_seconds', 0)
         duration_display = item.get('duration_display', '未記録')
@@ -290,11 +375,16 @@ def load_and_process_history():
         
         if isinstance(item.get('scores'), dict):
             for category, score in item['scores'].items():
+                try:
+                    score_value = float(score) if score is not None else 0
+                except (ValueError, TypeError):
+                    score_value = 0
+                    
                 score_data.append({
                     'date': date,
                     'type': item_type,
                     'category': category,
-                    'score': score,
+                    'score': score_value,
                     'duration_seconds': duration_seconds,
                     'duration_display': duration_display
                 })
@@ -302,7 +392,7 @@ def load_and_process_history():
     df_base = pd.DataFrame(df_data)
     df_scores = pd.DataFrame(score_data)
     
-    return history_data, df_base, df_scores
+    return df_base, df_scores
 
 history, df_base, df_scores = load_and_process_history()
 
