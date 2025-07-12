@@ -14,6 +14,9 @@ try:
         get_default_themes,
         generate_random_medical_theme
     )
+    from modules.utils import extract_scores, save_history, auto_save_session
+    from modules.session_manager import StreamlitSessionManager
+    from modules.database_adapter import DatabaseAdapter
 except ImportError:
     # モジュールが見つからない場合、親ディレクトリをパスに追加
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,36 +30,18 @@ except ImportError:
         get_default_themes,
         generate_random_medical_theme
     )
+    from modules.utils import extract_scores, save_history, auto_save_session
+    from modules.session_manager import StreamlitSessionManager
+    from modules.database_adapter import DatabaseAdapter
 
+# Google AI APIキーの確認
 try:
-    from modules.utils import (
-        check_api_configuration,
-        show_api_setup_guide,
-        save_history,
-        extract_scores,
-        auto_save_session,
-        get_recent_themes,
-        get_theme_history,
-        is_theme_recently_used,
-        render_progress_comparison,
-        save_recent_theme,
-        load_history
-    )
+    from modules.utils import check_api_configuration, show_api_setup_guide
 except ImportError:
-    # utilsモジュールもパスエラーの場合があるため、同様の処理を行う
-    from modules.utils import (
-        check_api_configuration,
-        show_api_setup_guide,
-        save_history,
-        extract_scores,
-        auto_save_session,
-        get_recent_themes,
-        get_theme_history,
-        is_theme_recently_used,
-        render_progress_comparison,
-        save_recent_theme,
-        load_history
-    )
+    def check_api_configuration():
+        return False, "API設定モジュールが見つかりません"
+    def show_api_setup_guide():
+        st.error("API設定ガイドが利用できません")
 
 st.set_page_config(
     page_title="医学部採用試験 自由記述対策",
@@ -64,6 +49,34 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# セッション管理の初期化（最重要：ページ読み込み時に必ず実行）
+if 'session_initialized' not in st.session_state:
+    try:
+        session_manager = StreamlitSessionManager()
+        current_session = session_manager.get_user_session()
+        st.session_state.session_manager = session_manager
+        st.session_state.current_session = current_session
+        st.session_state.session_initialized = True
+        
+        # デバッグ情報をコンパクトに表示
+        if current_session.is_authenticated:
+            st.sidebar.success(f"🔐 認証済み: {current_session.identification_method.value}")
+        else:
+            st.sidebar.info(f"🔐 セッション: {current_session.identification_method.value}")
+        
+    except Exception as e:
+        st.sidebar.error(f"セッション初期化エラー: {e}")
+        st.session_state.session_initialized = False
+
+# データベースアダプター初期化
+try:
+    db_adapter = DatabaseAdapter()
+    database_available = db_adapter.is_available()
+except Exception as e:
+    st.error(f"データベース初期化エラー: {e}")
+    database_available = False
+    db_adapter = None
 
 # --- セッション状態の初期化 ---
 def initialize_session():
@@ -87,49 +100,37 @@ if not api_ok:
     show_api_setup_guide()
     st.stop()
 
-# --- 履歴データの処理 ---
-@st.cache_data(ttl=300, show_spinner=False)  # スピナーを無効化
-def load_and_process_free_writing_history():
-    """自由記述の履歴データを読み込んで処理"""
-    try:
-        # 新しいデータベースマネージャーを使用
-        from modules.database import db_manager
-        return db_manager.load_practice_history('医学部採用試験 自由記述')
-        
-    except ImportError:
-        # フォールバック: 従来の方法
-        return _load_free_writing_history_local()
+# --- ヘッダー ---
+st.title("✍️ 医学部採用試験 自由記述対策")
 
-def _load_free_writing_history_local():
-    """フォールバック: ローカルファイルから自由記述履歴を読み込み"""
+# 自動セッション保存
+auto_save_session()
+
+# --- 履歴データの処理（新システム使用） ---
+@st.cache_data(ttl=300, show_spinner=False)
+def load_and_process_free_writing_history():
+    """自由記述の履歴データを読み込んで処理（新システム）"""
+    if not database_available:
+        return []
+    
     try:
-        history_data = load_history()
-        if not history_data:
-            return []
-        
-        # 自由記述の履歴のみを抽出
-        free_writing_history = []
-        for item in history_data:
-            if item.get('type') == '医学部採用試験 自由記述':
-                free_writing_history.append(item)
-        
-        # 日付順でソート（新しい順）
-        free_writing_history.sort(key=lambda x: x.get('date', ''), reverse=True)
-        return free_writing_history
+        return db_adapter.load_practice_history('free_writing')
     except Exception as e:
         st.error(f"履歴データの読み込みエラー: {e}")
         return []
 
-@st.cache_data(ttl=300, show_spinner=False)  # キャッシュ化して重複計算を防止
+@st.cache_data(ttl=300, show_spinner=False)
 def get_themes_with_stats():
-    """テーマ別の統計情報を取得（履歴データを一度だけ取得）"""
+    """テーマ別の統計情報を取得（新システム）"""
     history = load_and_process_free_writing_history()
     if not history:
         return {}
     
     themes_stats = {}
     for item in history:
-        theme = item.get('inputs', {}).get('theme', '不明')
+        inputs = item.get('inputs', {})
+        theme = inputs.get('theme', '不明')
+        
         if theme not in themes_stats:
             themes_stats[theme] = {
                 'count': 0,
@@ -162,14 +163,15 @@ def get_themes_with_stats():
     
     return themes_stats
 
-# ローカル履歴用のテーマ関連関数（重複リクエストを防ぐため）
+# 履歴関連のヘルパー関数（新システム）
 def get_recent_themes_local(limit: int = 5) -> list:
-    """自由記述の最近のテーマをローカル履歴から取得（重複リクエスト防止）"""
+    """最近のテーマを履歴から取得"""
     history = load_and_process_free_writing_history()
     recent_themes = []
     
     for item in history:
-        theme = item.get('inputs', {}).get('theme')
+        inputs = item.get('inputs', {})
+        theme = inputs.get('theme')
         if theme and theme not in recent_themes:
             recent_themes.append(theme)
             if len(recent_themes) >= limit:
@@ -178,28 +180,66 @@ def get_recent_themes_local(limit: int = 5) -> list:
     return recent_themes
 
 def get_theme_history_local(theme: str) -> list:
-    """特定テーマの履歴をローカル履歴から取得（重複リクエスト防止）"""
+    """特定テーマの履歴を取得"""
     history = load_and_process_free_writing_history()
-    theme_history = []
-    
-    for item in history:
-        if item.get('inputs', {}).get('theme') == theme and item.get('scores'):
-            theme_data = {
-                'date': item.get('date'),
-                'scores': item.get('scores'),
-                'feedback': item.get('feedback', ''),
-                'answer': item.get('inputs', {}).get('answer', '')
-            }
-            theme_history.append(theme_data)
-    
-    # 日付順でソート（新しい順）
-    theme_history.sort(key=lambda x: x['date'], reverse=True)
-    return theme_history
+    return [item for item in history if item.get('inputs', {}).get('theme') == theme]
 
 def is_theme_recently_used_local(theme: str, recent_limit: int = 3) -> bool:
-    """テーマが最近使用されたかローカル履歴からチェック（重複リクエスト防止）"""
+    """テーマが最近使用されたかチェック"""
     recent_themes = get_recent_themes_local(recent_limit)
     return theme in recent_themes
+
+def save_recent_theme(theme: str):
+    """最近のテーマを保存（新システムでは履歴システムが自動処理）"""
+    # 新システムでは履歴保存時に自動的に記録されるため、特別な処理は不要
+    pass
+
+def render_progress_comparison(theme: str, theme_history: list):
+    """進歩比較の表示"""
+    if len(theme_history) < 2:
+        return
+    
+    st.markdown("---")
+    st.markdown("### 📈 進歩の軌跡")
+    
+    scores = []
+    dates = []
+    
+    for item in theme_history:
+        item_scores = item.get('scores', {})
+        if item_scores:
+            avg_score = sum(item_scores.values()) / len(item_scores)
+            scores.append(avg_score)
+            try:
+                date = datetime.fromisoformat(item['date']).date()
+                dates.append(date)
+            except (ValueError, TypeError, KeyError):
+                dates.append(datetime.now().date())
+    
+    if len(scores) >= 2:
+        fig = px.line(
+            x=dates,
+            y=scores,
+            title=f"「{theme}」のスコア推移",
+            labels={'x': '練習日', 'y': 'スコア'}
+        )
+        fig.update_traces(line=dict(width=3, color='#667eea'))
+        fig.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            yaxis=dict(range=[0, 10.5])
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 改善度表示
+        if len(scores) >= 2:
+            improvement = scores[-1] - scores[0]
+            if improvement > 0:
+                st.success(f"📈 初回から+{improvement:.1f}ポイント向上しました！")
+            elif improvement == 0:
+                st.info("📊 スコアは横ばいです。さらなる向上を目指しましょう。")
+            else:
+                st.warning(f"📉 前回より{abs(improvement):.1f}ポイント下がりました。復習をおすすめします。")
 
 # --- UIコンポーネント ---
 def render_theme_selection():
@@ -502,8 +542,8 @@ def render_scoring_and_feedback():
         duration_seconds_remainder = int(duration_seconds % 60)
         
         history_data = {
-            "type": "医学部採用試験 自由記述",
-            "date": s['start_time'].isoformat(),
+            "type": "free_writing",
+            "date": completion_time.isoformat(),
             "duration_seconds": duration_seconds,
             "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
             "inputs": {
@@ -514,8 +554,12 @@ def render_scoring_and_feedback():
             "feedback": s['feedback'],
             "scores": extract_scores(s['feedback'])
         }
-        save_history(history_data)
-        st.success("今回の学習内容を履歴に保存しました。")
+        
+        filename = save_history(history_data)
+        if filename:
+            st.success("今回の学習内容を履歴に保存しました。")
+        else:
+            st.warning("履歴の保存で問題が発生しましたが、セッションには記録されています。")
         
         # セッション状態にテーマ履歴を更新
         save_recent_theme(s['theme'])
@@ -596,19 +640,16 @@ def render_history_overview():
     with col1:
         # データベース接続状況を表示
         try:
-            from modules.database import db_manager
-            status = db_manager.get_database_status()
-            
-            if status['available']:
-                st.success(f"🌐 **データベース接続**: 正常 (ID: {status['session_id'][:8]}...)")
-                if status.get('database_records'):
-                    st.caption(f"📊 データベース内履歴: {status['database_records']}件")
+            if database_available:
+                st.success(f"🌐 **データベース接続**: 正常 (ID: {st.session_state.current_session.session_id[:8]}...)")
+                if db_adapter.get_database_status().get('database_records'):
+                    st.caption(f"📊 データベース内履歴: {db_adapter.get_database_status()['database_records']}件")
             else:
                 st.warning("⚠️ **データベース接続**: オフライン")
-                if status['offline_records']:
-                    st.caption(f"📱 オフライン履歴: {status['offline_records']}件")
+                if db_adapter.get_database_status().get('offline_records'):
+                    st.caption(f"📱 オフライン履歴: {db_adapter.get_database_status()['offline_records']}件")
                     
-        except ImportError:
+        except Exception:
             st.info("📱 **履歴保存**: ローカルファイル使用")
     
     with col2:
@@ -619,18 +660,18 @@ def render_history_overview():
     
     with col3:
         # 履歴エクスポートボタン
-        try:
-            from modules.database import db_manager
+        if database_available:
             if st.button("💾 履歴保存", help="履歴をJSONファイルとして保存"):
-                export_data = db_manager.export_history('医学部採用試験 自由記述')
-                st.download_button(
-                    label="📥 履歴ダウンロード",
-                    data=export_data,
-                    file_name=f"自由記述履歴_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
-                )
-        except ImportError:
-            pass
+                try:
+                    export_data = db_adapter.export_history('free_writing')
+                    st.download_button(
+                        label="📥 履歴ダウンロード",
+                        data=export_data,
+                        file_name=f"自由記述履歴_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                except Exception as e:
+                    st.error(f"履歴エクスポートエラー: {e}")
     
     # 履歴とテーマ統計を一度に取得（重複を防止）
     history = load_and_process_free_writing_history()
@@ -855,3 +896,56 @@ def main():
 if __name__ == "__main__":
     main()
     auto_save_session()
+
+# サイドバー（統一されたセッション管理システム）
+with st.sidebar:
+    st.markdown("### 自由記述対策")
+    
+    # セッション状態の表示
+    try:
+        from modules.session_manager import session_manager
+        current_session = session_manager.get_user_session()
+        if current_session.is_persistent:
+            st.success(f"🔐 セッション: {current_session.identification_method.value}")
+        else:
+            st.info("🔐 セッション: 一時的")
+    except Exception as e:
+        st.warning("🔐 セッション: 状態不明")
+    
+    st.markdown("---")
+    
+    # 現在の状況表示
+    if s['step'] != 'theme_selection':
+        step_names = {
+            'generating_question': 'ステップ2: 問題生成中',
+            'answering': 'ステップ3: 回答入力',
+            'scoring': 'ステップ4: AI採点中',
+            'completed': '完了'
+        }
+        current_step = step_names.get(s['step'], 'N/A')
+        st.markdown(f"**現在のステップ:** {current_step}")
+        
+        if s['theme']:
+            st.markdown(f"**テーマ:** {s['theme']}")
+    
+    st.markdown("---")
+    
+    # 評価ポイント
+    with st.expander("📊 評価ポイント"):
+        st.markdown("""
+        - **医学知識**: 正確性・深度
+        - **臨床応用**: 実践的な思考力
+        - **論理構成**: 体系的な記述
+        - **患者安全**: 安全への配慮
+        """)
+    
+    st.markdown("---")
+    
+    if st.button("🔄 セッションをリセット", use_container_width=True):
+        s['step'] = 'theme_selection'
+        s['theme'] = ""
+        s['question'] = ""
+        s['answer'] = ""
+        s['feedback'] = None
+        s['start_time'] = None
+        st.rerun()

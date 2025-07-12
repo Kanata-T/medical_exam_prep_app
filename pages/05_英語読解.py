@@ -9,6 +9,8 @@ from modules.utils import (handle_submission, reset_session_state,
                           check_api_configuration, show_api_setup_guide,
                           extract_scores, save_history, format_history_for_download,
                           restore_exam_session, auto_save_session)
+from modules.database_adapter import DatabaseAdapter
+from modules.session_manager import StreamlitSessionManager
 import os
 
 st.set_page_config(
@@ -17,6 +19,23 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+# セッション管理の初期化（最重要：ページ読み込み時に必ず実行）
+if 'session_initialized' not in st.session_state:
+    try:
+        session_manager = StreamlitSessionManager()
+        current_session = session_manager.get_user_session()
+        st.session_state.session_manager = session_manager
+        st.session_state.current_session = current_session
+        st.session_state.session_initialized = True
+        
+        # デバッグ情報をコンパクトに表示
+        session_info = f"🔐 {current_session.identification_method.value}"
+        if current_session.is_authenticated:
+            session_info = f"✅ {session_info} (認証済み)"
+        
+    except Exception as e:
+        st.session_state.session_initialized = False
 
 # カスタムCSS
 st.markdown("""
@@ -352,7 +371,7 @@ if st.session_state.reading_step == 'setup':
                 
             with st.spinner(loading_message):
                 # 論文検索
-                paper_result = find_medical_paper(keywords)
+                paper_result = find_medical_paper(keywords, "english_reading")
                 if 'error' in paper_result:
                     st.error(f"論文検索エラー: {paper_result['error']}")
                     st.stop()
@@ -735,15 +754,16 @@ elif st.session_state.reading_step == 'scoring':
         duration_seconds_remainder = int(duration_seconds % 60)
         
         if submitted.get('exam_style', False):
-            exam_type = "過去問スタイル英語読解"
+            exam_type = "english_reading_standard"
             format_names = {
-                "letter_translation_opinion": "Letter形式（翻訳 + 意見）",
-                "paper_comment_translation_opinion": "論文コメント形式（コメント翻訳 + 意見）"
+                "letter_translation_opinion": "english_reading_letter_style",
+                "paper_comment_translation_opinion": "english_reading_comment_style"
             }
-            format_name = format_names.get(submitted.get('format_type', ''), '不明')
-            exam_type += f" - {format_name}"
+            format_type = submitted.get('format_type', 'letter_translation_opinion')
+            if format_type in format_names:
+                exam_type = format_names[format_type]
         else:
-            exam_type = "英語読解"
+            exam_type = "english_reading_standard"
         
         history_data = {
             "type": exam_type,
@@ -791,6 +811,18 @@ elif st.session_state.reading_step == 'scoring':
 # サイドバー情報
 with st.sidebar:
     st.markdown("### 読解練習情報")
+    
+    # セッション状態の表示
+    try:
+        from modules.session_manager import session_manager
+        current_session = session_manager.get_user_session()
+        if current_session.is_persistent:
+            st.success(f"🔐 セッション: {current_session.identification_method.value}")
+        else:
+            st.info("🔐 セッション: 一時的")
+    except Exception as e:
+        st.warning("🔐 セッション: 状態不明")
+    
     if st.session_state.reading_step != 'setup':
         st.markdown(f"**現在のステップ:** {progress_steps.get(st.session_state.reading_step, 'N/A')}")
     

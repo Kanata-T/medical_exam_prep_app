@@ -6,6 +6,8 @@ from modules.essay_scorer import (generate_long_essay_theme, score_long_essay_st
 from modules.utils import (check_api_configuration, show_api_setup_guide,
                           extract_scores, save_history, format_history_for_download,
                           auto_save_session)
+from modules.database_adapter import DatabaseAdapter
+from modules.session_manager import StreamlitSessionManager
 import os
 
 st.set_page_config(
@@ -14,6 +16,25 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="auto"
 )
+
+# セッション管理の初期化（最重要：ページ読み込み時に必ず実行）
+if 'session_initialized' not in st.session_state:
+    try:
+        session_manager = StreamlitSessionManager()
+        current_session = session_manager.get_user_session()
+        st.session_state.session_manager = session_manager
+        st.session_state.current_session = current_session
+        st.session_state.session_initialized = True
+        
+        # デバッグ情報
+        if current_session.is_authenticated:
+            st.sidebar.success(f"🔐 認証済み: {current_session.identification_method.value}")
+        else:
+            st.sidebar.info(f"🔐 セッション: {current_session.identification_method.value}")
+        
+    except Exception as e:
+        st.sidebar.error(f"セッション初期化エラー: {e}")
+        st.session_state.session_initialized = False
 
 # カスタムCSS
 st.markdown("""
@@ -310,7 +331,7 @@ elif st.session_state.essay_step == 'scoring':
             duration_seconds_remainder = int(duration_seconds % 60)
             
             history_data = {
-                "type": "小論文対策",
+                "type": "essay_practice",
                 "date": datetime.now().isoformat(),
                 "duration_seconds": duration_seconds,
                 "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
@@ -358,6 +379,17 @@ elif st.session_state.essay_step == 'scoring':
 # サイドバー
 with st.sidebar:
     st.header("小論文対策")
+    
+    # セッション状態の表示
+    try:
+        from modules.session_manager import session_manager
+        current_session = session_manager.get_user_session()
+        if current_session.is_persistent:
+            st.success(f"🔐 セッション: {current_session.identification_method.value}")
+        else:
+            st.info("🔐 セッション: 一時的")
+    except Exception as e:
+        st.warning("🔐 セッション: 状態不明")
     
     st.markdown("---")
     

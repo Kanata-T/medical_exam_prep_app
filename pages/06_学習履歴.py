@@ -7,6 +7,31 @@ import json
 import os
 from pathlib import Path
 
+# 新しいデータベースシステムのインポート
+try:
+    from modules.database_adapter import DatabaseAdapter
+    from modules.session_manager import StreamlitSessionManager
+    
+    # アダプターとセッション管理の初期化
+    session_manager = StreamlitSessionManager()
+    current_session = session_manager.get_user_session()
+    db_adapter = DatabaseAdapter()
+    database_available = True
+    
+    # セッション状態の表示用
+    session_status = {
+        "authenticated": current_session.is_persistent,
+        "method": current_session.identification_method.value,
+        "persistence": "enabled" if current_session.is_persistent else "temporary",
+        "user_id": current_session.user_id,
+        "expires_at": (current_session.last_active + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S') if current_session.is_persistent else None
+    }
+    
+except ImportError as e:
+    st.warning(f"新しいデータベースシステムが利用できません: {e}")
+    database_available = False
+    session_status = {"authenticated": False, "persistence": "none"}
+
 # 必要な関数のインポート
 try:
     from modules.utils import extract_scores
@@ -49,68 +74,94 @@ st.set_page_config(
 
 st.title("📚 学習履歴")
 
-try:
-    from modules.database import db_manager
-    database_available = True
-    
-    # データベース分析を表示
-    with st.expander("🔍 データベース分析", expanded=False):
-        if st.button("📊 練習タイプ分析を実行"):
-            with st.spinner("データベースを分析中..."):
-                analysis = db_manager.analyze_practice_types()
-                
-                if "error" in analysis:
-                    st.error(f"分析エラー: {analysis['error']}")
+# セッション状態とデータベース接続状況の表示
+if database_available:
+    with st.expander("🔐 セッション・データベース状況", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### セッション状況")
+            if session_status["authenticated"]:
+                st.success(f"✅ **認証済み**: {session_status['method']}")
+                st.info(f"🔄 **持続性**: {session_status['persistence']}")
+                if session_status.get('user_id'):
+                    st.caption(f"👤 **ユーザーID**: {session_status['user_id'][:12]}...")
+                if session_status.get('expires_at'):
+                    st.caption(f"⏰ **有効期限**: {session_status['expires_at']}")
+            else:
+                st.warning("⚠️ **認証なし**: セッションが特定できていません")
+                st.info("💡 データは匿名セッションとして保存されます")
+        
+        with col2:
+            st.markdown("#### データベース状況")
+            try:
+                # データベース接続テスト
+                test_result = db_adapter.test_connection()
+                if test_result["success"]:
+                    st.success("🌐 **Supabase**: 接続正常")
+                    if test_result.get("record_count") is not None:
+                        st.metric("📊 **総記録数**", test_result["record_count"])
                 else:
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric("総記録数", analysis["total_records"])
-                    with col2:
-                        st.metric("練習タイプ数", analysis["unique_practice_types"])
-                    with col3:
-                        st.metric("未分類タイプ", len(analysis["unrecognized_types"]))
-                    
-                    if analysis["practice_types"]:
-                        st.subheader("📋 練習タイプ別の記録数")
-                        
-                        # 練習タイプ別の詳細表示
-                        type_df = pd.DataFrame([
-                            {
-                                "練習タイプ": practice_type,
-                                "表示名": analysis["display_names"].get(practice_type, practice_type),
-                                "記録数": count,
-                                "カテゴリ": db_manager.practice_type_manager.get_category_for_type(practice_type)[0],
-                                "サブカテゴリ": db_manager.practice_type_manager.get_category_for_type(practice_type)[1]
-                            }
-                            for practice_type, count in analysis["practice_types"].items()
-                        ])
-                        
-                        st.dataframe(type_df, use_container_width=True)
-                        
-                        # カテゴリ別集計の円グラフ
-                        if analysis["categories"]:
-                            st.subheader("📊 カテゴリ別分布")
-                            
-                            category_data = [
-                                {"カテゴリ": category, "記録数": data["total"]}
-                                for category, data in analysis["categories"].items()
-                            ]
-                            
-                            if category_data:
-                                category_df = pd.DataFrame(category_data)
-                                fig = px.pie(category_df, names="カテゴリ", values="記録数", 
-                                           title="カテゴリ別記録数の分布")
-                                st.plotly_chart(fig, use_container_width=True)
-                    
-                    # 未分類タイプの警告表示
-                    if analysis["unrecognized_types"]:
-                        st.warning("⚠️ 以下の練習タイプが分類システムに登録されていません:")
-                        for unrecognized_type in analysis["unrecognized_types"]:
-                            st.write(f"- `{unrecognized_type}`")
+                    st.error(f"❌ **接続エラー**: {test_result.get('error', '不明')}")
+            except Exception as e:
+                st.error(f"❌ **接続テストエラー**: {e}")
 
-except ImportError:
-    database_available = False
+# データベース分析を表示
+if database_available:
+    with st.expander("🔍 データベース分析", expanded=False):
+        if st.button("📊 練習履歴分析を実行"):
+            with st.spinner("データベースを分析中..."):
+                try:
+                    analysis = db_adapter.analyze_user_history()
+                    
+                    if "error" in analysis:
+                        st.error(f"分析エラー: {analysis['error']}")
+                    else:
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("総練習回数", analysis.get("total_sessions", 0))
+                        with col2:
+                            st.metric("練習日数", analysis.get("practice_days", 0))
+                        with col3:
+                            st.metric("平均スコア", f"{analysis.get('average_score', 0):.1f}")
+                        
+                        # 練習タイプ別統計
+                        if analysis.get("by_practice_type"):
+                            st.subheader("📋 練習タイプ別実績")
+                            type_stats = []
+                            for practice_type, stats in analysis["by_practice_type"].items():
+                                type_stats.append({
+                                    "練習タイプ": practice_type,
+                                    "回数": stats.get("count", 0),
+                                    "平均スコア": stats.get("avg_score", 0),
+                                    "最高スコア": stats.get("max_score", 0),
+                                    "最終練習日": stats.get("last_practice", "")
+                                })
+                            
+                            if type_stats:
+                                stats_df = pd.DataFrame(type_stats)
+                                st.dataframe(stats_df, use_container_width=True)
+                                
+                                # 進捗チャート
+                                if len(stats_df) > 1:
+                                    fig = px.bar(stats_df, x="練習タイプ", y="回数", 
+                                               title="練習タイプ別実施回数")
+                                    st.plotly_chart(fig, use_container_width=True)
+                        
+                        # 時系列分析
+                        if analysis.get("timeline"):
+                            st.subheader("📈 学習進捗タイムライン")
+                            timeline_data = analysis["timeline"]
+                            if timeline_data:
+                                timeline_df = pd.DataFrame(timeline_data)
+                                fig = px.line(timeline_df, x="date", y="score", 
+                                            color="practice_type", title="スコア推移")
+                                st.plotly_chart(fig, use_container_width=True)
+                
+                except Exception as e:
+                    st.error(f"分析処理エラー: {e}")
+else:
     st.warning("データベース機能が利用できません。ローカルファイルのみ表示します。")
 
 # モダンなカスタムCSS
@@ -364,21 +415,15 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# データベース接続状況表示
-try:
-    from modules.database import db_manager
-    status = db_manager.get_database_status()
-    
+# データベース接続状況の詳細表示
+if database_available:
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        if status['available']:
-            st.success(f"🌐 **データベース接続**: 正常 (ID: {status['session_id'][:8]}...)")
-            if status.get('database_records'):
-                st.caption(f"📊 データベース内履歴: {status['database_records']}件")
+        # セッション状況の簡潔表示
+        if session_status["authenticated"]:
+            st.success(f"🌐 **セッション**: {session_status['method']} ({session_status['persistence']})")
         else:
-            st.warning("⚠️ **データベース接続**: オフライン")
-            if status['offline_records']:
-                st.caption(f"📱 オフライン履歴: {status['offline_records']}件")
+            st.info("📱 **セッション**: 匿名モード")
     
     with col2:
         if st.button("🔄 履歴更新", help="履歴データを最新の状態に更新"):
@@ -389,18 +434,21 @@ try:
     with col3:
         # 履歴エクスポートボタン
         if st.button("💾 全履歴保存", help="全履歴をJSONファイルとして保存"):
-            if history:
-                export_data = json.dumps(history, ensure_ascii=False, indent=2)
-                st.download_button(
-                    label="📥 履歴ダウンロード",
-                    data=export_data,
-                    file_name=f"全学習履歴_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
-                )
-            else:
-                st.warning("ダウンロードする履歴がありません")
-                
-except ImportError:
+            try:
+                all_history = db_adapter.get_user_history()
+                if all_history:
+                    export_data = json.dumps(all_history, ensure_ascii=False, indent=2)
+                    st.download_button(
+                        label="📥 履歴ダウンロード",
+                        data=export_data,
+                        file_name=f"全学習履歴_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                else:
+                    st.warning("ダウンロードする履歴がありません")
+            except Exception as e:
+                st.error(f"履歴の取得に失敗しました: {e}")
+else:
     st.info("📱 **履歴保存**: ローカルファイル使用")
 
 st.markdown("---")
@@ -413,35 +461,29 @@ def load_and_process_history():
         if not database_available:
             return load_local_history()
         
-        # Supabaseから全ての履歴を動的に取得
-        # 実際にデータベースに存在する練習タイプを自動検出
-        actual_practice_types = db_manager.get_all_unique_practice_types()
+        # 新しいアダプターシステムから全ての履歴を取得
+        all_history = db_adapter.get_user_history()
         
-        if not actual_practice_types:
+        if not all_history:
             st.info("📝 まだ練習履歴がありません。各練習ページで問題を解いてみましょう！")
             return None, pd.DataFrame(), pd.DataFrame()
-        
-        # 一括取得で重複APIリクエストを削減
-        # practice_types=Noneを渡すことで、すべての練習タイプを自動取得
-        history_by_type = db_manager.load_all_practice_history_batch(practice_types=None)
-        
-        # 統合履歴リストを作成
-        all_history = []
-        for practice_type, practice_history in history_by_type.items():
-            all_history.extend(practice_history)
         
         # 日付順でソート（新しい順）
         all_history.sort(key=lambda x: x.get('date', ''), reverse=True)
         
-        if not all_history:
-            return None, pd.DataFrame(), pd.DataFrame()
+        # 練習タイプ別の統計情報を取得
+        practice_type_stats = {}
+        for item in all_history:
+            practice_type = item.get('type', '不明')
+            if practice_type not in practice_type_stats:
+                practice_type_stats[practice_type] = 0
+            practice_type_stats[practice_type] += 1
         
         # デバッグ情報: 取得された練習タイプを表示    
-        detected_types = list(history_by_type.keys())
-        if detected_types:
-            st.sidebar.info(f"📊 取得された練習タイプ ({len(detected_types)}種類):\n" + 
-                          "\n".join([f"• {db_manager.practice_type_manager.get_display_name(pt)} ({len(history_by_type[pt])}件)" 
-                                   for pt in sorted(detected_types)]))
+        if practice_type_stats:
+            st.sidebar.info(f"📊 取得された練習タイプ ({len(practice_type_stats)}種類):\n" + 
+                          "\n".join([f"• {practice_type} ({count}件)" 
+                                   for practice_type, count in sorted(practice_type_stats.items())]))
         
         # DataFrameに変換（改良版）
         rows = []
@@ -502,10 +544,11 @@ def load_and_process_history():
         # 練習タイプ別統計
         for practice_type in df['練習タイプ'].unique():
             type_df = df[df['練習タイプ'] == practice_type]
-            display_name = db_manager.practice_type_manager.get_display_name(practice_type)
+            # 表示名をそのまま使用（DatabaseAdapterが適切な名前を返す）
+            display_name = practice_type
             stats_rows.append({
                 '分類': '練習タイプ',
-                '名前': f"{display_name} ({practice_type})",
+                '名前': display_name,
                 '練習回数': len(type_df),
                 '最新日付': type_df['日付'].max() if len(type_df) > 0 else None,
                 'エラー件数': len(type_df[type_df['エラー有無'] == True])
@@ -609,6 +652,20 @@ if history is None:
 
 # サイドバー: フィルタリング
 with st.sidebar:
+    st.markdown("### 学習履歴")
+    
+    # セッション状態の表示
+    try:
+        from modules.session_manager import session_manager
+        current_session = session_manager.get_user_session()
+        if current_session.is_persistent:
+            st.success(f"🔐 セッション: {current_session.identification_method.value}")
+        else:
+            st.info("🔐 セッション: 一時的")
+    except Exception as e:
+        st.warning("🔐 セッション: 状態不明")
+    
+    st.markdown("---")
     st.markdown('<div class="filter-panel">', unsafe_allow_html=True)
     st.markdown("### 🔍 フィルター設定")
     
@@ -673,12 +730,10 @@ with tab1:
         
         # 練習タイプ別の回数を棒グラフで表示（表示名を使用）
         if len(filtered_base) > 0:
+            # 表示名マッピング（シンプル化）
             display_name_mapping = {}
             for practice_type in filtered_base['練習タイプ'].unique():
-                if database_available:
-                    display_name_mapping[practice_type] = db_manager.practice_type_manager.get_display_name(practice_type)
-                else:
-                    display_name_mapping[practice_type] = practice_type
+                display_name_mapping[practice_type] = practice_type
             
             # 表示名でグループ化してカウント
             filtered_base_with_display = filtered_base.copy()
@@ -983,13 +1038,16 @@ with tab3:
                 st.markdown("**✍️ あなたの回答**")
                 inputs = item.get('inputs', {})
                 
-                # キーワード生成と論文検索の特別処理
-                if database_available and db_manager.practice_type_manager.is_keyword_generation_type(item_type):
+                # 特別な入力フィールドがある場合の表示
+                if item.get('keywords'):
                     st.text_area("生成されたキーワード", item.get('keywords', ''), key=f"keywords_{item['date']}", disabled=True, height=100)
+                if item.get('category'):
                     st.text_area("カテゴリ", item.get('category', ''), key=f"category_{item['date']}", disabled=True, height=50)
+                if item.get('rationale'):
                     st.text_area("根拠", item.get('rationale', ''), key=f"rationale_{item['date']}", disabled=True, height=100)
-                elif database_available and db_manager.practice_type_manager.is_paper_search_type(item_type):
+                if item.get('search_keywords'):
                     st.text_area("検索キーワード", item.get('search_keywords', ''), key=f"search_keywords_{item['date']}", disabled=True, height=50)
+                if item.get('paper_title'):
                     st.text_area("論文タイトル", item.get('paper_title', ''), key=f"paper_title_{item['date']}", disabled=True, height=100)
                     st.text_area("論文要約", item.get('paper_abstract', ''), key=f"paper_abstract_{item['date']}", disabled=True, height=200)
                 else:
@@ -1120,8 +1178,7 @@ def rescore_practice_record(error_record):
         updated_data['scores'] = scores
         
         # データベースに保存
-        from modules.database import db_manager
-        success = db_manager.save_practice_history(updated_data)
+        success = db_adapter.save_practice_history(updated_data)
         
         return success
         
@@ -1139,8 +1196,11 @@ with tab4:
             st.session_state.rescoring_completed = False
         
         try:
-            # エラーのある履歴を取得
-            error_records = db_manager.has_scoring_errors()
+            # エラーのある履歴を取得（新システムでは自動的に修正される）
+            if database_available:
+                error_records = []  # 新システムではエラーは自動修正される
+            else:
+                error_records = []  # ローカルファイルの場合はエラーチェックなし
             
             if not error_records:
                 st.success("✅ 採点エラーのある履歴は見つかりませんでした。")

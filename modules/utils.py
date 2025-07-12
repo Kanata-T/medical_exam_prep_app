@@ -8,6 +8,7 @@ import pickle
 import hashlib
 import time
 import random
+import uuid
 
 HISTORY_DIR = "history"
 SESSION_BACKUP_DIR = "session_backup"
@@ -254,54 +255,137 @@ def save_history(data):
     import logging
     logger = logging.getLogger(__name__)
     
-    logger.info(f"save_history called with data type: {data.get('type', 'Unknown')}")
-    logger.info(f"save_history data keys: {list(data.keys())}")
+    logger.info(f"=== SAVE_HISTORY START ===")
+    logger.info(f"Input data type: {data.get('type', 'Unknown')}")
+    logger.info(f"Input data keys: {list(data.keys())}")
+    logger.info(f"Inputs content: {data.get('inputs', {})}")
+    logger.info(f"Scores content: {data.get('scores', {})}")
     
     try:
-        # 新しいデータベースマネージャーを使用
-        from modules.database import db_manager
-        logger.info("Calling db_manager.save_practice_history...")
-        success = db_manager.save_practice_history(data)
+        # 新しいデータベースアダプターシステムを使用
+        from modules.database_adapter import DatabaseAdapter
+        from modules.session_manager import StreamlitSessionManager
         
-        logger.info(f"db_manager.save_practice_history returned: {success}")
+        # セッション管理の初期化と確認
+        if 'session_manager' not in st.session_state or 'current_session' not in st.session_state:
+            logger.info("Initializing session manager in save_history")
+            session_manager = StreamlitSessionManager()
+            current_session = session_manager.get_user_session()
+            st.session_state.session_manager = session_manager
+            st.session_state.current_session = current_session
+        else:
+            logger.info("Using existing session manager from session state")
+            session_manager = st.session_state.session_manager
+            current_session = st.session_state.current_session
+        
+        # セッション情報をログ
+        logger.info(f"Current session - Method: {current_session.identification_method.value}, "
+                   f"User ID: {current_session.user_id[:8]}..., "
+                   f"Authenticated: {current_session.is_authenticated}, "
+                   f"Persistent: {current_session.is_persistent}")
+        
+        # データベースアダプターで保存
+        logger.info("Creating DatabaseAdapter instance...")
+        db_adapter = DatabaseAdapter()
+        
+        logger.info("Checking database availability...")
+        if db_adapter.is_available():
+            logger.info("✅ Database is available")
+        else:
+            logger.warning("❌ Database is NOT available")
+        
+        logger.info("Calling DatabaseAdapter.save_practice_history...")
+        success = db_adapter.save_practice_history(data)
+        
+        logger.info(f"DatabaseAdapter.save_practice_history returned: {success}")
         
         if success:
-            logger.info("History saved successfully via database")
+            logger.info(f"✅ History saved successfully via new database system for user: {current_session.user_id[:8]}...")
+            logger.info(f"=== SAVE_HISTORY SUCCESS ===")
             # データベース保存成功時はダミーファイル名を返す（互換性のため）
             return f"db_record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         else:
-            # フォールバック: ローカルファイル保存
-            logger.warning("Database save failed, falling back to local file")
-            return _save_history_local(data)
-            
-    except ImportError as e:
-        # データベースモジュールが利用できない場合はローカル保存
-        logger.error(f"ImportError: {e}, falling back to local save")
-        return _save_history_local(data)
+            logger.error(f"❌ Database save failed, attempting fallback to legacy system...")
+            # フォールバック: 旧システムでの保存を試行
+            fallback_result = _save_to_legacy_system(data)
+            logger.info(f"Legacy system save result: {fallback_result}")
+            logger.info(f"=== SAVE_HISTORY FALLBACK ===")
+            return fallback_result
+        
     except Exception as e:
-        logger.error(f"Unexpected error in save_history: {e}")
+        logger.error(f"❌ Error in save_history: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        return _save_history_local(data)
+        
+        # エラー時のフォールバック
+        try:
+            logger.info("Attempting emergency fallback to legacy system...")
+            fallback_result = _save_to_legacy_system(data)
+            logger.info(f"Emergency fallback result: {fallback_result}")
+            logger.info(f"=== SAVE_HISTORY EMERGENCY_FALLBACK ===")
+            return fallback_result
+        except Exception as fallback_error:
+            logger.error(f"❌ Emergency fallback also failed: {fallback_error}")
+            logger.info(f"=== SAVE_HISTORY FAILED ===")
+            return None
 
-def _save_history_local(data):
-    """Saves a record to the local history directory (fallback)."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(HISTORY_DIR, f"{timestamp}.json")
+def _save_to_legacy_system(data):
+    """旧システム（ローカルファイル）への保存"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Attempting legacy system save...")
+        
+        # 旧システムでの保存処理
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.json"
+        
+        os.makedirs(HISTORY_DIR, exist_ok=True)
+        filepath = os.path.join(HISTORY_DIR, filename)
+        
+        # データにタイムスタンプとIDを追加
+        save_data = data.copy()
+        save_data['saved_at'] = datetime.now().isoformat()
+        save_data['file_id'] = filename
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Successfully saved to legacy system: {filename}")
         return filename
-    except IOError as e:
-        st.error(f"履歴の保存中にエラーが発生しました: {e}")
+        
+    except Exception as e:
+        logger.error(f"Legacy system save failed: {e}")
         return None
 
 def load_history():
     """Loads all history records from database or local directory as fallback."""
     try:
-        # 新しいデータベースマネージャーを使用
-        from modules.database import db_manager
-        return db_manager.load_practice_history()
+        # 新しいデータベースアダプターシステムを使用
+        from modules.database_adapter import DatabaseAdapter
+        from modules.session_manager import StreamlitSessionManager
+        
+        # セッション管理の初期化と確認
+        if 'session_manager' not in st.session_state or 'current_session' not in st.session_state:
+            session_manager = StreamlitSessionManager()
+            current_session = session_manager.get_user_session()
+            st.session_state.session_manager = session_manager
+            st.session_state.current_session = current_session
+        else:
+            session_manager = st.session_state.session_manager
+            current_session = st.session_state.current_session
+        
+        # データベースアダプターで履歴取得
+        db_adapter = DatabaseAdapter()
+        user_history = db_adapter.get_user_history()
+        
+        # ログ情報
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Loaded {len(user_history)} history items for user: {current_session.user_id[:8]}... "
+                   f"(Method: {current_session.identification_method.value})")
+        
+        return user_history
         
     except ImportError:
         # データベースモジュールが利用できない場合はローカルファイル読み込み
@@ -650,9 +734,17 @@ def get_recent_themes(practice_type: str, limit: int = 5) -> list:
         list: 最近使用されたテーマのリスト
     """
     try:
-        # 新しいデータベースマネージャーを使用
-        from modules.database import db_manager
-        return db_manager.get_recent_themes(practice_type, limit)
+        # 新しいデータベースアダプターシステムを使用
+        from modules.database_adapter import DatabaseAdapter
+        from modules.session_manager import StreamlitSessionManager
+        
+        # セッション管理の初期化
+        session_manager = StreamlitSessionManager()
+        session_manager.initialize_session()
+        
+        # データベースアダプターで取得
+        db_adapter = DatabaseAdapter()
+        return db_adapter.get_recent_themes(practice_type, limit)
         
     except ImportError:
         # フォールバック: 従来の方法
@@ -689,9 +781,17 @@ def get_theme_history(practice_type: str, theme: str) -> list:
         list: 過去の成績データのリスト（日付の新しい順）
     """
     try:
-        # 新しいデータベースマネージャーを使用
-        from modules.database import db_manager
-        return db_manager.get_theme_history(practice_type, theme)
+        # 新しいデータベースアダプターシステムを使用
+        from modules.database_adapter import DatabaseAdapter
+        from modules.session_manager import StreamlitSessionManager
+        
+        # セッション管理の初期化
+        session_manager = StreamlitSessionManager()
+        session_manager.initialize_session()
+        
+        # データベースアダプターで取得
+        db_adapter = DatabaseAdapter()
+        return db_adapter.get_theme_history(practice_type, theme)
         
     except ImportError:
         # フォールバック: 従来の方法
@@ -738,9 +838,17 @@ def is_theme_recently_used(practice_type: str, theme: str, recent_limit: int = 3
         bool: 最近使用されている場合True
     """
     try:
-        # 新しいデータベースマネージャーを使用
-        from modules.database import db_manager
-        return db_manager.is_theme_recently_used(practice_type, theme, recent_limit)
+        # 新しいデータベースアダプターシステムを使用
+        from modules.database_adapter import DatabaseAdapter
+        from modules.session_manager import StreamlitSessionManager
+        
+        # セッション管理の初期化
+        session_manager = StreamlitSessionManager()
+        session_manager.initialize_session()
+        
+        # データベースアダプターで確認
+        db_adapter = DatabaseAdapter()
+        return db_adapter.is_theme_recently_used(practice_type, theme, recent_limit)
         
     except ImportError:
         # フォールバック: 従来の方法

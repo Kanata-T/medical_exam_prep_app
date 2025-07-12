@@ -5,6 +5,9 @@ from modules.utils import safe_api_call
 import re
 import random
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 def validate_keywords(keywords):
     """
@@ -29,13 +32,14 @@ def validate_keywords(keywords):
     
     return True, ""
 
-def find_medical_paper(keywords=None):
+def find_medical_paper(keywords=None, purpose="general"):
     """
     与えられたキーワードでPubMedから医学論文情報を検索・取得する。
     キーワードがない場合は、AIが国家試験範囲内で自動選択する。
     
     Args:
         keywords (str, optional): 検索キーワード. Defaults to None.
+        purpose (str, optional): 使用目的 ("medical_exam", "english_reading", "general"). Defaults to "general".
     
     Returns:
         dict: {
@@ -46,6 +50,14 @@ def find_medical_paper(keywords=None):
             "error": str (optional)
         }
     """
+    # purposeに基づいて適切な練習タイプを決定
+    purpose_to_practice_type = {
+        "medical_exam": "medical_exam_comprehensive",
+        "english_reading": "english_reading_standard", 
+        "general": "paper_search"
+    }
+    practice_type = purpose_to_practice_type.get(purpose, "paper_search")
+    
     # キーワードが入力されている場合のみ検証
     if keywords:
         is_valid, error_msg = validate_keywords(keywords)
@@ -61,7 +73,7 @@ def find_medical_paper(keywords=None):
         keywords_used = keywords
     else:
         # キーワードがない場合は、AIに国家試験範囲内で生成させる
-        keyword_result = generate_medical_keywords()
+        keyword_result = generate_medical_keywords(purpose)
         if 'error' in keyword_result:
             return {
                 "title": "",
@@ -458,7 +470,7 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
         from datetime import datetime
         
         history_data = {
-            "type": "論文検索",
+            "type": practice_type,  # purposeに基づいた練習タイプ
             "date": datetime.now().isoformat(),
             "keywords": result.get("keywords_used", ""),
             "category": result.get("category", ""),
@@ -467,12 +479,14 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
             "relevance_score": result.get("relevance_score", 0),
             "citations_count": len(result.get("citations", [])),
             "abstract_length": len(result.get("abstract", "")),
+            "purpose": purpose,  # 目的も記録
             "success": True
         }
         save_history(history_data)
         
         # デバッグ出力
         print(f"論文検索成功 - 履歴保存:")
+        print(f"  - 目的: {purpose} -> 練習タイプ: {practice_type}")
         print(f"  - キーワード: {result.get('keywords_used', '')}")
         print(f"  - 分野: {result.get('category', '')}")
         print(f"  - タイトル: {result.get('title', '')[:50]}...")
@@ -484,10 +498,11 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
         from datetime import datetime
         
         history_data = {
-            "type": "論文検索",
+            "type": practice_type,  # purposeに基づいた練習タイプ
             "date": datetime.now().isoformat(),
             "keywords": keywords_used if 'keywords_used' in locals() else "",
             "category": generated_category if not keywords and 'generated_category' in locals() else "",
+            "purpose": purpose,  # 目的も記録
             "error": str(result),
             "success": False
         }
@@ -495,6 +510,7 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
         
         # デバッグ出力
         print(f"論文検索失敗 - 履歴保存:")
+        print(f"  - 目的: {purpose} -> 練習タイプ: {practice_type}")
         print(f"  - キーワード: {keywords_used if 'keywords_used' in locals() else ''}")
         print(f"  - エラー: {str(result)[:100]}...")
         
@@ -537,11 +553,11 @@ def generate_medical_keywords(purpose="general"):
     """
     # 新しい命名規則に対応した練習タイプ名を決定
     if purpose == "paper_search":
-        practice_type = "キーワード生成（論文検索用）"
+        practice_type = "keyword_generation_paper"
     elif purpose == "free_writing":
-        practice_type = "キーワード生成（自由記述用）"
+        practice_type = "keyword_generation_freeform"
     else:
-        practice_type = "キーワード生成"
+        practice_type = "keyword_generation_general"
     
     def _generate_keywords():
         """内部のキーワード生成関数"""
@@ -831,32 +847,77 @@ def generate_essay_theme():
 
 def get_keyword_history():
     """
-    過去のキーワード生成履歴を取得します（historyフォルダから）。
+    過去のキーワード生成履歴を取得します（新DB対応版）。
     
     Returns:
         list: キーワード履歴のリスト
     """
+    try:
+        from modules.database_adapter import DatabaseAdapter
+        
+        db_adapter = DatabaseAdapter()
+        
+        # 新DBからキーワード生成関連の履歴を取得
+        keyword_types = [
+            'keyword_generation_paper',
+            'keyword_generation_freeform', 
+            'keyword_generation_general'
+        ]
+        
+        all_history = []
+        for practice_type in keyword_types:
+            history = db_adapter.get_practice_history_by_type(practice_type)
+            all_history.extend(history)
+        
+        # 日付順でソート（最新順）
+        all_history.sort(key=lambda x: x.get('date', ''), reverse=True)
+        
+        # 必要な形式に変換
+        keyword_history = []
+        for item in all_history:
+            # 入力データから関連情報を抽出
+            inputs = item.get('inputs', {})
+            keyword_history.append({
+                'keywords': inputs.get('keywords', item.get('keywords', '')),
+                'category': inputs.get('category', item.get('category', '')),
+                'rationale': inputs.get('rationale', item.get('rationale', '')),
+                'date': item.get('date', ''),
+                'purpose': inputs.get('purpose', item.get('purpose', 'general'))
+            })
+        
+        # セッション状態の一時履歴も追加（まだ保存されていないもの）
+        session_history = getattr(st.session_state, 'keyword_history', [])
+        keyword_history.extend(session_history)
+        
+        return keyword_history
+        
+    except Exception as e:
+        logger.warning(f"新DB履歴取得失敗、フォールバック使用: {e}")
+        return _get_keyword_history_legacy()
+
+def _get_keyword_history_legacy():
+    """従来版のキーワード履歴取得（フォールバック用）"""
     from modules.utils import load_history
     
     # 永続化された履歴とセッション状態の履歴をマージ
     persistent_history = load_history()
     keyword_history = []
     
-    # 永続化履歴からキーワード生成記録を抽出（新しい命名規則対応）
+    # 永続化履歴からキーワード生成記録を抽出（旧形式対応）
     for item in persistent_history:
         practice_type = item.get('type', '')
-        # キーワード生成の全バリエーションに対応
-        if (practice_type == 'キーワード生成' or 
-            practice_type.startswith('キーワード生成')):
+        # 新旧両方の形式に対応
+        if (practice_type in ['keyword_generation_paper', 'keyword_generation_freeform', 'keyword_generation_general'] or
+            practice_type == 'キーワード生成' or practice_type.startswith('キーワード生成')):
             keyword_history.append({
                 'keywords': item.get('keywords', ''),
                 'category': item.get('category', ''),
                 'rationale': item.get('rationale', ''),
                 'date': item.get('date', ''),
-                'purpose': item.get('purpose', 'general')  # 用途情報も含める
+                'purpose': item.get('purpose', 'general')
             })
     
-    # セッション状態の一時履歴も追加（まだ保存されていないもの）
+    # セッション状態の一時履歴も追加
     session_history = getattr(st.session_state, 'keyword_history', [])
     keyword_history.extend(session_history)
     
@@ -864,12 +925,44 @@ def get_keyword_history():
 
 def clear_keyword_history():
     """
-    キーワード生成履歴をクリアします（永続化履歴とセッション履歴の両方）。
+    キーワード生成履歴をクリアします（新DB対応版）。
     """
+    try:
+        from modules.database_adapter import DatabaseAdapter
+        
+        db_adapter = DatabaseAdapter()
+        
+        # 新DBからキーワード生成関連の履歴を削除
+        keyword_types = [
+            'keyword_generation_paper',
+            'keyword_generation_freeform',
+            'keyword_generation_general'
+        ]
+        
+        deleted_count = 0
+        for practice_type in keyword_types:
+            count = db_adapter.delete_practice_history_by_type(practice_type)
+            deleted_count += count
+        
+        # セッション状態の履歴もクリア
+        if 'keyword_history' in st.session_state:
+            st.session_state.keyword_history = []
+            
+        logger.info(f"キーワード履歴削除完了: {deleted_count}件")
+        return True
+        
+    except Exception as e:
+        # フォールバック: 従来のファイル削除を実行
+        logger.warning(f"新DB履歴削除失敗、フォールバック使用: {e}")
+        return _clear_keyword_history_legacy()
+
+def _clear_keyword_history_legacy():
+    """従来版のキーワード履歴削除（フォールバック用）"""
     import os
     from modules.utils import HISTORY_DIR
     
-    # 永続化履歴からキーワード生成タイプのファイルを削除（新しい命名規則対応）
+    deleted_count = 0
+    # 永続化履歴からキーワード生成タイプのファイルを削除（新旧両形式対応）
     if os.path.exists(HISTORY_DIR):
         for filename in os.listdir(HISTORY_DIR):
             if filename.endswith('.json'):
@@ -879,10 +972,11 @@ def clear_keyword_history():
                     with open(filepath, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                     practice_type = data.get('type', '')
-                    # キーワード生成の全バリエーションを削除対象に
-                    if (practice_type == 'キーワード生成' or 
-                        practice_type.startswith('キーワード生成')):
+                    # 新旧両方の形式を削除対象に
+                    if (practice_type in ['keyword_generation_paper', 'keyword_generation_freeform', 'keyword_generation_general'] or
+                        practice_type == 'キーワード生成' or practice_type.startswith('キーワード生成')):
                         os.remove(filepath)
+                        deleted_count += 1
                         print(f"削除: {filename}")
                 except (json.JSONDecodeError, IOError):
                     continue
@@ -890,6 +984,9 @@ def clear_keyword_history():
     # セッション状態の履歴もクリア
     if 'keyword_history' in st.session_state:
         st.session_state.keyword_history = []
+
+    logger.info(f"従来形式でキーワード履歴削除: {deleted_count}件")
+    return True
 
 def get_available_fields():
     """
@@ -937,7 +1034,7 @@ PAST_EXAM_PATTERNS = [
         "type": "paper_comment_translation_opinion",
         "topic": "皮膚膿瘍抗菌薬治療",
         "content": {
-            "paper_summary": """2016年3月に皮膚膿瘍に関して以下のような論文が出ました。
+            "paper_summary": """2016年3月に皮膿瘍に関して以下のような論文が出ました。
 皮膿瘍による救急受診が、メチシリン耐性黄色ブドウ球菌（MRSA）の出現に伴い増加しており、救急部において、単純性膿瘍に対し切開排膿を受ける外来患者を対象に、トリメトプリム・スルファメトキサゾールがプラセボに対して優越性が認められるかどうかを検討し、主要転帰は膿瘍の臨床的治癒とし、7～14日の時点で評価した。皮膿瘍の切開排膿を受けた患者にトリメトプリム・スルファメトキサゾールを投与することで、プラセボと比較して高い治癒率が得られた。""",
             "comment": """The study by Talan et al. supports the use of antibiotics as an adjunctive treatment for uncomplicated skin abscesses, but this recommendation runs contrary to current efforts to reduce antibiotic use in the face of the rising threat of antimicrobial resistance. We note that up to a quarter of the swabs processed in the study showed either no growth or coagulase-negative staphylococcal growth. Did the authors find a difference in response rate stratified according to these culture results? In addition, since high adherence to antibiotic therapy was achieved in only 64.7% of study participants, was a subanalysis performed for those who received courses that were shorter than prescribed? When antibiotics are used as an adjunct to drainage, the majority of bacteria are probably removed during surgery, and recent studies have shown that adequate source control can shorten the standard course of antibiotics without reducing clinical efficacy. Therefore, it is likely that when antibiotics are used as an adjunctive treatment, a shorter course would provide equivalent clinical benefit and would also reduce the risks of adverse effects, limit total antibiotic consumption, and decrease the selective pressure toward the development of resistance."""
         },

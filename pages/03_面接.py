@@ -7,6 +7,8 @@ from modules.interview_prepper import (generate_interview_question, score_interv
 from modules.utils import (check_api_configuration, show_api_setup_guide,
                           extract_scores, save_history, format_history_for_download,
                           auto_save_session)
+from modules.database_adapter import DatabaseAdapter
+from modules.session_manager import StreamlitSessionManager
 import os
 import base64
 from io import BytesIO
@@ -26,6 +28,23 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="auto"
 )
+
+# セッション管理の初期化（最重要：ページ読み込み時に必ず実行）
+if 'session_initialized' not in st.session_state:
+    try:
+        session_manager = StreamlitSessionManager()
+        current_session = session_manager.get_user_session()
+        st.session_state.session_manager = session_manager
+        st.session_state.current_session = current_session
+        st.session_state.session_initialized = True
+        
+        # デバッグ情報をコンパクトに表示
+        session_info = f"🔐 {current_session.identification_method.value}"
+        if current_session.is_authenticated:
+            session_info = f"✅ {session_info} (認証済み)"
+        
+    except Exception as e:
+        st.session_state.session_initialized = False
 
 # カスタムCSS
 st.markdown("""
@@ -296,7 +315,7 @@ def run_single_practice():
         duration_seconds_remainder = int(duration_seconds % 60)
         
         history_data = {
-            "type": "面接対策(単発)", "date": datetime.now().isoformat(),
+            "type": "interview_practice_single", "date": datetime.now().isoformat(),
             "duration_seconds": duration_seconds,
             "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
             "inputs": {"question": vars_dict.get('question', ''), "answer": vars_dict.get('user_answer', '')},
@@ -361,7 +380,7 @@ def run_session_practice():
                 duration_seconds_remainder = int(duration_seconds % 60)
                 
                 history_data = {
-                    "type": "面接対策(セッション)", "date": datetime.now().isoformat(),
+                    "type": "interview_practice_session", "date": datetime.now().isoformat(),
                     "duration_seconds": duration_seconds,
                     "duration_display": f"{duration_minutes}分{duration_seconds_remainder}秒",
                     "inputs": {"conversation": state['chat_history']},
@@ -413,6 +432,18 @@ def main():
     # サイドバー
     with st.sidebar:
         st.header("面接対策")
+        
+        # セッション状態の表示
+        try:
+            from modules.session_manager import session_manager
+            current_session = session_manager.get_user_session()
+            if current_session.is_persistent:
+                st.success(f"🔐 セッション: {current_session.identification_method.value}")
+            else:
+                st.info("🔐 セッション: 一時的")
+        except Exception as e:
+            st.warning("🔐 セッション: 状態不明")
+        
         if st.session_state.interview_mode:
             if st.button("モード選択に戻る", use_container_width=True):
                 st.session_state.interview_mode = None
