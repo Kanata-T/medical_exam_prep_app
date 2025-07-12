@@ -100,8 +100,6 @@ if not api_ok:
     show_api_setup_guide()
     st.stop()
 
-# --- ヘッダー ---
-st.title("✍️ 医学部採用試験 自由記述対策")
 
 # 自動セッション保存
 auto_save_session()
