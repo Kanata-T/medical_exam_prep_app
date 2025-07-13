@@ -1,9 +1,13 @@
 import streamlit as st
 import google.genai as genai
-from modules.utils import safe_api_call, score_with_retry_stream
+import json
 import re
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
+from modules.utils import safe_api_call, score_with_retry_stream
+from modules.database_adapter_v3 import DatabaseAdapterV3
 
-def validate_essay_inputs(theme, memo, essay):
+def validate_essay_inputs(theme: str, memo: str, essay: str) -> Tuple[bool, str]:
     """
     小論文入力値を検証します。
     
@@ -13,7 +17,7 @@ def validate_essay_inputs(theme, memo, essay):
         essay (str): 清書
     
     Returns:
-        tuple: (bool, str) - (有効?, エラーメッセージ)
+        Tuple[bool, str]: (有効?, エラーメッセージ)
     """
     if not theme or len(theme.strip()) < 10:
         return False, "小論文テーマが設定されていません。"
@@ -30,12 +34,12 @@ def validate_essay_inputs(theme, memo, essay):
     
     return True, ""
 
-def get_essay_themes_samples():
+def get_essay_themes_samples() -> List[str]:
     """
     サンプルテーマのリストを返します。
     
     Returns:
-        list: サンプルテーマのリスト
+        List[str]: サンプルテーマのリスト
     """
     return [
         "AI技術の医療分野への導入について、期待と課題を論じなさい。（1000字以内）",
@@ -45,12 +49,12 @@ def get_essay_themes_samples():
         "患者の自己決定権と医師の職業倫理について、あなたの見解を述べなさい。（1000字以内）"
     ]
 
-def generate_long_essay_theme():
+def generate_long_essay_theme() -> Dict[str, str]:
     """
     1000字程度の小論文のテーマを生成する。
     
     Returns:
-        dict: {
+        Dict[str, str]: {
             "theme": str,
             "error": str (optional)
         }
@@ -112,9 +116,14 @@ def generate_long_essay_theme():
             "error": f"テーマ生成エラー: {result}"
         }
 
-def get_long_essay_scoring_prompt(theme, memo, essay):
+def get_long_essay_scoring_prompt(theme: str, memo: str, essay: str) -> str:
     """
     小論文採点用プロンプトを生成します。
+    
+    Args:
+        theme (str): 小論文テーマ
+        memo (str): 構成メモ
+        essay (str): 清書
     
     Returns:
         str: 採点用プロンプト
@@ -181,7 +190,7 @@ class EssayError(Exception):
     """小論文処理専用の例外クラス"""
     pass
 
-def score_long_essay_stream(theme, memo, essay):
+def score_long_essay_stream(theme: str, memo: str, essay: str, save_to_db: bool = True) -> Any:
     """
     小論文の構成メモと清書を採点し、結果をストリーミングで返す。
     リトライ機能付きで503エラーなどに対応。
@@ -190,6 +199,7 @@ def score_long_essay_stream(theme, memo, essay):
         theme (str): 小論文テーマ
         memo (str): 構成メモ
         essay (str): 清書
+        save_to_db (bool): データベースに保存するかどうか
     
     Yields:
         採点結果のストリーミングチャンク
@@ -200,6 +210,10 @@ def score_long_essay_stream(theme, memo, essay):
         yield type('ErrorChunk', (), {'text': f"❌ 入力エラー: {error_msg}"})()
         return
 
+    # 採点開始時間記録
+    start_time = datetime.now()
+    full_response = ""
+    
     # リトライ機能付きの採点関数を定義
     def _score_essay_internal():
         try:
@@ -230,15 +244,135 @@ def score_long_essay_stream(theme, memo, essay):
             
             raise EssayError(error_msg)
     
-    # リトライ機能付きでストリーミング実行
-    yield from score_with_retry_stream(_score_essay_internal)
+    # ストリーミング実行とレスポンス収集
+    try:
+        for chunk in score_with_retry_stream(_score_essay_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
+    except Exception as e:
+        yield type('ErrorChunk', (), {'text': f"❌ 採点エラー: {str(e)}"})()
+        return
+    
+    # 採点完了後の処理
+    if save_to_db and full_response:
+        try:
+            # スコア解析
+            parsed_result = parse_essay_score_from_response(full_response)
+            
+            # 入力データ準備
+            inputs = {
+                'theme': theme,
+                'memo': memo,
+                'essay': essay
+            }
+            
+            # データベースに保存
+            success = save_essay_scoring_result(
+                inputs=inputs,
+                scores=parsed_result['scores'],
+                feedback=parsed_result['feedback']
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 小論文採点結果保存エラー: {e}")
+    
+    # 採点時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 小論文採点時間: {duration:.2f}秒")
 
-def get_essay_writing_tips():
+def parse_essay_score_from_response(response_text: str) -> Dict[str, Any]:
+    """
+    AI応答から小論文スコアを解析します。
+    
+    Args:
+        response_text (str): AIの応答テキスト
+        
+    Returns:
+        Dict[str, Any]: 解析されたスコアとフィードバック
+    """
+    try:
+        # JSONスコアの抽出
+        score_match = re.search(r'```json\s*({[^}]+})\s*```', response_text, re.DOTALL)
+        if score_match:
+            score_json = score_match.group(1)
+            scores = json.loads(score_json)
+        else:
+            # フォールバック: 数値の直接抽出
+            scores = {}
+            score_patterns = {
+                "構成メモ": r"構成メモ[：:]\s*(\d+)",
+                "清書": r"清書[：:]\s*(\d+)",
+                "小論文": r"小論文[：:]\s*(\d+)"
+            }
+            
+            for category, pattern in score_patterns.items():
+                match = re.search(pattern, response_text)
+                if match:
+                    scores[category] = int(match.group(1))
+        
+        return {
+            'scores': scores,
+            'feedback': response_text,
+            'raw_response': response_text
+        }
+        
+    except Exception as e:
+        return {
+            'scores': {},
+            'feedback': response_text,
+            'raw_response': response_text,
+            'parse_error': str(e)
+        }
+
+def save_essay_scoring_result(inputs: Dict[str, Any], scores: Dict[str, Any], 
+                            feedback: str, ai_model: str = 'gemini-2.5-pro') -> bool:
+    """
+    小論文採点結果をデータベースに保存します。
+    
+    Args:
+        inputs (Dict[str, Any]): 入力データ
+        scores (Dict[str, Any]): スコアデータ
+        feedback (str): フィードバック
+        ai_model (str): 使用したAIモデル
+        
+    Returns:
+        bool: 保存成功時True
+    """
+    try:
+        db_adapter = DatabaseAdapterV3()
+        
+        # 入力データの準備
+        input_data = {
+            'type': 'essay_scoring',  # 新DBに存在するタイプ名
+            'date': str(datetime.now()),
+            'inputs': inputs,
+            'scores': scores,
+            'feedback': feedback,
+            'duration_seconds': 0  # 採点時間は別途計測が必要
+        }
+        
+        # データベースに保存
+        success = db_adapter.save_practice_history(input_data)
+        
+        if success:
+            print(f"✅ 小論文採点結果を保存しました")
+        else:
+            print(f"❌ 小論文採点結果の保存に失敗しました")
+        
+        return success
+        
+    except Exception as e:
+        print(f"❌ 小論文採点結果保存エラー: {e}")
+        return False
+
+def get_essay_writing_tips() -> Dict[str, List[str]]:
     """
     小論文作成のヒントを返します。
     
     Returns:
-        dict: カテゴリ別のヒント
+        Dict[str, List[str]]: カテゴリ別のヒント
     """
     return {
         "構成メモのコツ": [

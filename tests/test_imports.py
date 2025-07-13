@@ -18,7 +18,7 @@ class TestImports(unittest.TestCase):
     def test_database_adapter_import(self):
         """DatabaseAdapterのインポートテスト"""
         try:
-            from modules.database_adapter import DatabaseAdapter
+            from modules.database_adapter_v3 import DatabaseAdapterV3
             self.assertTrue(True, "DatabaseAdapter インポート成功")
         except ImportError as e:
             self.fail(f"DatabaseAdapter インポートエラー: {e}")
@@ -26,16 +26,16 @@ class TestImports(unittest.TestCase):
     def test_database_adapter_instantiation(self):
         """DatabaseAdapterのインスタンス化テスト"""
         try:
-            from modules.database_adapter import DatabaseAdapter
-            db = DatabaseAdapter()
+            from modules.database_adapter_v3 import DatabaseAdapterV3
+            db = DatabaseAdapterV3()
             self.assertIsNotNone(db, "DatabaseAdapter インスタンス化成功")
         except Exception as e:
             self.fail(f"DatabaseAdapter インスタンス化エラー: {e}")
     
     def test_database_adapter_new_methods(self):
         """DatabaseAdapterの新機能メソッド存在確認"""
-        from modules.database_adapter import DatabaseAdapter
-        db = DatabaseAdapter()
+        from modules.database_adapter_v3 import DatabaseAdapterV3
+        db = DatabaseAdapterV3()
         
         # 新しく追加したメソッドが存在するかチェック
         self.assertTrue(hasattr(db, 'get_practice_history_by_type'), 
@@ -43,20 +43,20 @@ class TestImports(unittest.TestCase):
         self.assertTrue(hasattr(db, 'delete_practice_history_by_type'), 
                        "delete_practice_history_by_type メソッド存在")
     
-    def test_database_v2_import(self):
-        """DatabaseManagerV2のインポートテスト"""
+    def test_database_v3_import(self):
+        """DatabaseManagerV3のインポートテスト"""
         try:
-            from modules.database_v2 import DatabaseManagerV2
-            self.assertTrue(True, "DatabaseManagerV2 インポート成功")
+            from modules.database_v3 import DatabaseManagerV3
+            self.assertTrue(True, "DatabaseManagerV3 インポート成功")
         except ImportError as e:
-            self.fail(f"DatabaseManagerV2 インポートエラー: {e}")
-    
-    def test_database_v2_new_method(self):
-        """DatabaseManagerV2の新機能メソッド存在確認"""
-        from modules.database_v2 import DatabaseManagerV2
-        db_v2 = DatabaseManagerV2()
+            self.fail(f"DatabaseManagerV3 インポート失敗: {e}")
+
+    def test_database_v3_new_method(self):
+        """DatabaseManagerV3の新機能メソッド存在確認"""
+        from modules.database_v3 import DatabaseManagerV3
+        db_v3 = DatabaseManagerV3()
         
-        self.assertTrue(hasattr(db_v2, 'delete_user_history_by_type'), 
+        self.assertTrue(hasattr(db_v3, 'delete_user_history_by_type'), 
                        "delete_user_history_by_type メソッド存在")
     
     def test_paper_finder_import(self):

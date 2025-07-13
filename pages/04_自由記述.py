@@ -16,7 +16,7 @@ try:
     )
     from modules.utils import extract_scores, save_history, auto_save_session
     from modules.session_manager import StreamlitSessionManager
-    from modules.database_adapter import DatabaseAdapter
+    from modules.database_adapter_v3 import DatabaseAdapterV3
 except ImportError:
     # モジュールが見つからない場合、親ディレクトリをパスに追加
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +32,7 @@ except ImportError:
     )
     from modules.utils import extract_scores, save_history, auto_save_session
     from modules.session_manager import StreamlitSessionManager
-    from modules.database_adapter import DatabaseAdapter
+    from modules.database_adapter_v3 import DatabaseAdapterV3
 
 # Google AI APIキーの確認
 try:
@@ -71,7 +71,7 @@ if 'session_initialized' not in st.session_state:
 
 # データベースアダプター初期化
 try:
-    db_adapter = DatabaseAdapter()
+    db_adapter = DatabaseAdapterV3()
     database_available = db_adapter.is_available()
 except Exception as e:
     st.error(f"データベース初期化エラー: {e}")
@@ -163,19 +163,38 @@ def get_themes_with_stats():
 
 # 履歴関連のヘルパー関数（新システム）
 def get_recent_themes_local(limit: int = 5) -> list:
-    """最近のテーマを履歴から取得"""
-    history = load_and_process_free_writing_history()
-    recent_themes = []
-    
-    for item in history:
-        inputs = item.get('inputs', {})
-        theme = inputs.get('theme')
-        if theme and theme not in recent_themes:
-            recent_themes.append(theme)
+    """最近のテーマをキーワード履歴から取得"""
+    try:
+        from modules.database_v3 import db_manager_v3
+        # キーワード履歴から自由記述用のテーマ生成履歴を取得
+        keyword_history = db_manager_v3.get_keyword_history(exercise_type_id=11)  # keyword_generation_free
+        recent_themes = []
+        
+        for item in keyword_history:
+            keywords = item.get('generated_keywords', [])
+            for keyword in keywords:
+                if keyword and keyword not in recent_themes:
+                    recent_themes.append(keyword)
+                    if len(recent_themes) >= limit:
+                        break
             if len(recent_themes) >= limit:
                 break
-    
-    return recent_themes
+        
+        return recent_themes
+    except Exception as e:
+        # フォールバック: 従来の方法で履歴から取得
+        history = load_and_process_free_writing_history()
+        recent_themes = []
+        
+        for item in history:
+            inputs = item.get('inputs', {})
+            theme = inputs.get('theme')
+            if theme and theme not in recent_themes:
+                recent_themes.append(theme)
+                if len(recent_themes) >= limit:
+                    break
+        
+        return recent_themes
 
 def get_theme_history_local(theme: str) -> list:
     """特定テーマの履歴を取得"""
@@ -287,7 +306,7 @@ def render_theme_selection():
                     generated_theme = None
                     
                     for attempt in range(max_attempts):
-                        theme = generate_random_medical_theme(avoid_themes=recent_themes)
+                        theme = generate_random_medical_theme(avoid_themes=recent_themes, save_to_db=True)
                         
                         # エラーチェック
                         if "エラー" in theme:
@@ -515,7 +534,7 @@ def render_scoring_and_feedback():
     st.subheader("📊 医学部採用試験基準での評価")
 
     with st.spinner("医学部採用試験の採点委員が評価中..."):
-        stream = score_medical_answer_stream(s['question'], s['answer'])
+        stream = score_medical_answer_stream(s['question'], s['answer'], save_to_db=False)
         
         with st.container(border=True):
             feedback_placeholder = st.empty()

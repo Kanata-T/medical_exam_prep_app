@@ -104,9 +104,9 @@ def test_keyword_generation_purpose_distinction():
         print("\n2. キーワード生成のpurpose-practice_typeマッピング")
         
         test_mappings = {
-            "paper_search": "keyword_generation_paper",
-            "free_writing": "keyword_generation_freeform",
-            "general": "keyword_generation_general"
+            "paper_search": "keyword_generation_english",
+            "free_writing": "keyword_generation_free",
+            "general": "keyword_generation_english"
         }
         
         for purpose, expected_type in test_mappings.items():
@@ -154,11 +154,11 @@ def test_page_call_integration():
     print("\n2. 履歴保存の区別確認")
     
     expected_practice_types = [
-        "medical_exam_comprehensive",  # 県総採用試験
-        "english_reading_standard",    # 英語読解
-        "keyword_generation_paper",    # 論文検索用キーワード
-        "keyword_generation_freeform", # 自由記述用キーワード
-        "keyword_generation_general"   # 一般用キーワード
+        "prefecture_adoption",         # 県総採用試験
+        "english_reading_practice",    # 英語読解
+        "keyword_generation_english",  # 論文検索用キーワード
+        "keyword_generation_free",     # 自由記述用キーワード
+        "keyword_generation_adoption"  # 採用試験用キーワード
     ]
     
     for practice_type in expected_practice_types:
@@ -174,18 +174,18 @@ def test_database_adapter_compatibility():
     print("=" * 60)
     
     try:
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         
-        db = DatabaseAdapter()
+        db = DatabaseAdapterV3()
         print("✅ DatabaseAdapter インスタンス化成功")
         
         # 新しい練習タイプのマッピング確認
         new_practice_types = [
-            "medical_exam_comprehensive",
-            "english_reading_standard",
-            "keyword_generation_paper",
-            "keyword_generation_freeform",
-            "keyword_generation_general"
+            "prefecture_adoption",
+            "english_reading_practice",
+            "keyword_generation_english",
+            "keyword_generation_free",
+            "keyword_generation_adoption"
         ]
         
         print("\n新しい練習タイプのマッピング確認:")
@@ -208,6 +208,10 @@ def test_database_adapter_compatibility():
         else:
             print("⚠️ 一部の練習タイプでマッピングエラーがあります")
             
+        # 新スキーマの履歴取得テスト
+        records = db.get_user_history()
+        assert isinstance(records, list)
+        
         print(f"\n✅ DatabaseAdapterとの互換性テスト完了")
         
     except Exception as e:

@@ -9,13 +9,13 @@ from pathlib import Path
 
 # 新しいデータベースシステムのインポート
 try:
-    from modules.database_adapter import DatabaseAdapter
+    from modules.database_adapter_v3 import DatabaseAdapterV3
     from modules.session_manager import StreamlitSessionManager
     
     # アダプターとセッション管理の初期化
     session_manager = StreamlitSessionManager()
     current_session = session_manager.get_user_session()
-    db_adapter = DatabaseAdapter()
+    db_adapter = DatabaseAdapterV3()
     database_available = True
     
     # セッション状態の表示用
@@ -97,10 +97,12 @@ if database_available:
             try:
                 # データベース接続テスト
                 test_result = db_adapter.test_connection()
-                if test_result["success"]:
+                if test_result.get("test_result") == "success" or test_result.get("available", False):
                     st.success("🌐 **Supabase**: 接続正常")
-                    if test_result.get("record_count") is not None:
-                        st.metric("📊 **総記録数**", test_result["record_count"])
+                    if test_result.get("exercise_types_count") is not None:
+                        st.metric("📊 **演習タイプ数**", test_result["exercise_types_count"])
+                    if test_result.get("current_user_id"):
+                        st.caption(f"👤 **ユーザーID**: {test_result['current_user_id'][:12]}...")
                 else:
                     st.error(f"❌ **接続エラー**: {test_result.get('error', '不明')}")
             except Exception as e:
@@ -603,8 +605,11 @@ def _process_to_dataframes(history_data):
             'duration_display': duration_display
         })
         
-        if isinstance(item.get('scores'), dict):
-            for category, score in item['scores'].items():
+        # 新しいDB設計に対応したスコア処理
+        scores = item.get('scores', {})
+        if isinstance(scores, dict):
+            # 旧形式のスコアデータ
+            for category, score in scores.items():
                 try:
                     score_value = float(score) if score is not None else 0
                 except (ValueError, TypeError):
@@ -618,6 +623,25 @@ def _process_to_dataframes(history_data):
                     'duration_seconds': duration_seconds,
                     'duration_display': duration_display
                 })
+        elif isinstance(scores, list):
+            # 新しいDB設計のスコアデータ（リスト形式）
+            for score_item in scores:
+                if isinstance(score_item, dict):
+                    category = score_item.get('score_category', '不明')
+                    score_value = score_item.get('score_value', 0)
+                    max_score = score_item.get('max_score', 10)
+                    
+                    # 百分率スコアを計算
+                    percentage_score = (score_value / max_score) * 10 if max_score > 0 else 0
+                    
+                    score_data.append({
+                        'date': date,
+                        'type': item_type,
+                        'category': category,
+                        'score': percentage_score,
+                        'duration_seconds': duration_seconds,
+                        'duration_display': duration_display
+                    })
     
     df_base = pd.DataFrame(df_data)
     df_scores = pd.DataFrame(score_data)
@@ -692,7 +716,7 @@ with st.sidebar:
     available_types = df_base['練習タイプ'].unique().tolist()
     selected_types = st.multiselect("📚 練習タイプ", available_types, default=available_types, key="practice_type_filter")
     
-    if not df_scores.empty:
+    if not df_scores.empty and 'score' in df_scores.columns:
         score_min = int(df_scores['score'].min())
         score_max = int(df_scores['score'].max())
         score_range = st.slider(
@@ -701,6 +725,8 @@ with st.sidebar:
             max_value=score_max,
             value=(score_min, score_max)
         )
+    else:
+        score_range = (0, 10)  # デフォルト値
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -709,13 +735,13 @@ base_mask_date = (df_base['日付'].dt.date >= start_date) & (df_base['日付'].
 base_mask_type = df_base['練習タイプ'].isin(selected_types)
 filtered_base = df_base[base_mask_date & base_mask_type]
 
-if not df_scores.empty:
+if not df_scores.empty and 'score' in df_scores.columns:
     mask_date = (df_scores['date'].dt.date >= start_date) & (df_scores['date'].dt.date <= end_date)
     mask_type = df_scores['type'].isin(selected_types)
     mask_score = (df_scores['score'] >= score_range[0]) & (df_scores['score'] <= score_range[1]) if 'score_range' in locals() else pd.Series([True] * len(df_scores))
     filtered_scores = df_scores[mask_date & mask_type & mask_score]
 else:
-    filtered_scores = pd.DataFrame(columns=df_scores.columns)
+    filtered_scores = pd.DataFrame(columns=df_scores.columns if not df_scores.empty else [])
 
 # タブ作成
 tab1, tab2, tab3, tab4 = st.tabs(["📈 統計サマリー", "📊 詳細分析", "📋 履歴一覧", "🔧 エラー確認"])
@@ -787,7 +813,7 @@ with tab1:
             """.format(total_practices), unsafe_allow_html=True)
 
         with col2:
-            if not filtered_scores.empty:
+            if not filtered_scores.empty and 'score' in filtered_scores.columns:
                 avg_score = filtered_scores['score'].mean()
                 st.markdown("""
                 <div class="stat-card success">
@@ -804,7 +830,7 @@ with tab1:
                 """, unsafe_allow_html=True)
 
         with col3:
-            if not filtered_scores.empty:
+            if not filtered_scores.empty and 'score' in filtered_scores.columns:
                 best_score = filtered_scores['score'].max()
                 st.markdown("""
                 <div class="stat-card warning">
@@ -844,7 +870,7 @@ with tab2:
     subtab1, subtab2, subtab3 = st.tabs(["📈 スコア推移", "🎯 カテゴリ別分析", "📅 学習パターン"])
 
     with subtab1:
-        if not filtered_scores.empty and len(filtered_scores) > 1:
+        if not filtered_scores.empty and 'score' in filtered_scores.columns and len(filtered_scores) > 1:
             fig = px.line(
                 filtered_scores, 
                 x='date', 
@@ -868,7 +894,7 @@ with tab2:
             st.info("📊 スコア付きのデータが2件以上ある場合にスコア推移が表示されます。")
 
     with subtab2:
-        if not filtered_scores.empty:
+        if not filtered_scores.empty and 'score' in filtered_scores.columns:
             category_stats = filtered_scores.groupby(['type', 'category']).agg(
                 mean_score=('score', 'mean'),
                 max_score=('score', 'max'),

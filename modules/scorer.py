@@ -1,6 +1,11 @@
 import streamlit as st
 import google.genai as genai
+import json
+import re
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
 from modules.utils import safe_api_call, score_with_retry_stream
+from modules.database_adapter_v3 import DatabaseAdapterV3
 
 def validate_exam_inputs(abstract, translation, opinion, essay, essay_theme):
     """
@@ -118,7 +123,8 @@ class ScoringError(Exception):
     """採点処理専用の例外クラス"""
     pass
 
-def score_exam_stream(abstract, translation, opinion, essay, essay_theme):
+def score_exam_stream(abstract: str, translation: str, opinion: str, essay: str, essay_theme: str, 
+                     save_to_db: bool = True) -> Any:
     """
     採用試験の提出物を採点し、結果をストリーミングで返す。
     リトライ機能付きで503エラーなどに対応。
@@ -129,6 +135,7 @@ def score_exam_stream(abstract, translation, opinion, essay, essay_theme):
         opinion (str): 意見  
         essay (str): 小論文
         essay_theme (str): 小論文テーマ
+        save_to_db (bool): データベースに保存するかどうか
     
     Yields:
         採点結果のストリーミングチャンク
@@ -138,6 +145,10 @@ def score_exam_stream(abstract, translation, opinion, essay, essay_theme):
     if not is_valid:
         yield type('ErrorChunk', (), {'text': f"❌ 入力エラー: {error_msg}"})()
         return
+    
+    # 採点開始時間記録
+    start_time = datetime.now()
+    full_response = ""
     
     # リトライ機能付きの採点関数を定義
     def _score_exam_internal():
@@ -169,8 +180,135 @@ def score_exam_stream(abstract, translation, opinion, essay, essay_theme):
             
             raise ScoringError(error_msg)
     
-    # リトライ機能付きでストリーミング実行
-    yield from score_with_retry_stream(_score_exam_internal)
+    # ストリーミング実行とレスポンス収集
+    try:
+        for chunk in score_with_retry_stream(_score_exam_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
+    except Exception as e:
+        yield type('ErrorChunk', (), {'text': f"❌ 採点エラー: {str(e)}"})()
+        return
+    
+    # 採点完了後の処理
+    if save_to_db and full_response:
+        try:
+            # スコア解析
+            parsed_result = parse_score_from_response(full_response)
+            
+            # 入力データ準備
+            inputs = {
+                'abstract': abstract,
+                'translation': translation,
+                'opinion': opinion,
+                'essay': essay,
+                'essay_theme': essay_theme
+            }
+            
+            # データベースに保存
+            save_scoring_result(
+                exercise_type='採用試験採点',
+                inputs=inputs,
+                scores=parsed_result['scores'],
+                feedback=parsed_result['feedback']
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 採点結果保存エラー: {e}")
+    
+    # 採点時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 採点時間: {duration:.2f}秒")
+
+def parse_score_from_response(response_text: str) -> Dict[str, Any]:
+    """
+    AI応答からスコアを解析します。
+    
+    Args:
+        response_text (str): AIの応答テキスト
+        
+    Returns:
+        Dict[str, Any]: 解析されたスコアとフィードバック
+    """
+    try:
+        # JSONスコアの抽出
+        score_match = re.search(r'```json\s*({[^}]+})\s*```', response_text, re.DOTALL)
+        if score_match:
+            score_json = score_match.group(1)
+            scores = json.loads(score_json)
+        else:
+            # フォールバック: 数値の直接抽出
+            scores = {}
+            score_patterns = {
+                "日本語訳": r"日本語訳[：:]\s*(\d+)",
+                "意見": r"意見[：:]\s*(\d+)",
+                "小論文": r"小論文[：:]\s*(\d+)",
+                "翻訳評価": r"翻訳評価[：:]\s*(\d+)",
+                "理解度": r"理解度[：:]\s*(\d+)",
+                "総合評価": r"総合評価[：:]\s*(\d+)"
+            }
+            
+            for category, pattern in score_patterns.items():
+                match = re.search(pattern, response_text)
+                if match:
+                    scores[category] = int(match.group(1))
+        
+        return {
+            'scores': scores,
+            'feedback': response_text,
+            'raw_response': response_text
+        }
+        
+    except Exception as e:
+        return {
+            'scores': {},
+            'feedback': response_text,
+            'raw_response': response_text,
+            'parse_error': str(e)
+        }
+
+def save_scoring_result(exercise_type: str, inputs: Dict[str, Any], scores: Dict[str, Any], 
+                       feedback: str, ai_model: str = 'gemini-2.5-pro') -> bool:
+    """
+    採点結果をデータベースに保存します。
+    
+    Args:
+        exercise_type (str): 演習タイプ
+        inputs (Dict[str, Any]): 入力データ
+        scores (Dict[str, Any]): スコアデータ
+        feedback (str): フィードバック
+        ai_model (str): 使用したAIモデル
+        
+    Returns:
+        bool: 保存成功時True
+    """
+    try:
+        db_adapter = DatabaseAdapterV3()
+        
+        # 入力データの準備
+        input_data = {
+            'type': exercise_type,
+            'date': str(datetime.now()),
+            'inputs': inputs,
+            'scores': scores,
+            'feedback': feedback,
+            'duration_seconds': 0  # 採点時間は別途計測が必要
+        }
+        
+        # データベースに保存
+        success = db_adapter.save_practice_history(input_data)
+        
+        if success:
+            print(f"✅ 採点結果を保存しました: {exercise_type}")
+        else:
+            print(f"❌ 採点結果の保存に失敗しました: {exercise_type}")
+        
+        return success
+        
+    except Exception as e:
+        print(f"❌ 採点結果保存エラー: {e}")
+        return False
 
 def get_score_distribution():
     """
@@ -296,7 +434,7 @@ def get_reading_scoring_prompt(abstract, translation, opinion):
 [医学英語読解力向上のための具体的なアドバイス]
 """
 
-def score_reading_stream(abstract, translation, opinion):
+def score_reading_stream(abstract: str, translation: str, opinion: str, save_to_db: bool = True) -> Any:
     """
     英語読解（翻訳+考察）の提出物を採点し、結果をストリーミングで返す。
     リトライ機能付きで503エラーなどに対応。
@@ -305,6 +443,7 @@ def score_reading_stream(abstract, translation, opinion):
         abstract (str): 原文Abstract
         translation (str): 日本語訳
         opinion (str): 意見・考察
+        save_to_db (bool): データベースに保存するかどうか
     
     Yields:
         採点結果のストリーミングチャンク
@@ -315,6 +454,10 @@ def score_reading_stream(abstract, translation, opinion):
         yield type('ErrorChunk', (), {'text': f"❌ 入力エラー: {error_msg}"})()
         return
 
+    # 採点開始時間記録
+    start_time = datetime.now()
+    full_response = ""
+    
     # リトライ機能付きの採点関数を定義
     def _score_reading_internal():
         try:
@@ -345,8 +488,44 @@ def score_reading_stream(abstract, translation, opinion):
             
             raise ScoringError(error_msg)
     
-    # リトライ機能付きでストリーミング実行
-    yield from score_with_retry_stream(_score_reading_internal)
+    # ストリーミング実行とレスポンス収集
+    try:
+        for chunk in score_with_retry_stream(_score_reading_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
+    except Exception as e:
+        yield type('ErrorChunk', (), {'text': f"❌ 採点エラー: {str(e)}"})()
+        return
+    
+    # 採点完了後の処理
+    if save_to_db and full_response:
+        try:
+            # スコア解析
+            parsed_result = parse_score_from_response(full_response)
+            
+            # 入力データ準備
+            inputs = {
+                'abstract': abstract,
+                'translation': translation,
+                'opinion': opinion
+            }
+            
+            # データベースに保存
+            save_scoring_result(
+                exercise_type='english_reading_practice',  # 新DBに存在するタイプ名
+                inputs=inputs,
+                scores=parsed_result['scores'],
+                feedback=parsed_result['feedback']
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 採点結果保存エラー: {e}")
+    
+    # 採点時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 採点時間: {duration:.2f}秒")
 
 def get_exam_style_scoring_prompt(content, translation, opinion, format_type, task_instruction=""):
     """
@@ -497,7 +676,8 @@ def get_exam_style_scoring_prompt(content, translation, opinion, format_type, ta
 [医学英語読解力向上のための具体的なアドバイス]
 """
 
-def score_exam_style_stream(content, translation, opinion, format_type, task_instruction=""):
+def score_exam_style_stream(content: Any, translation: str, opinion: str = "", format_type: str = "", 
+                          task_instruction: str = "", save_to_db: bool = True) -> Any:
     """
     過去問スタイルの提出物を採点し、結果をストリーミングで返す。
     リトライ機能付きで503エラーなどに対応。
@@ -508,6 +688,7 @@ def score_exam_style_stream(content, translation, opinion, format_type, task_ins
         opinion: 受験者の意見（Letter形式の場合のみ）
         format_type: 出題形式
         task_instruction: 課題指示文
+        save_to_db: データベースに保存するかどうか
     
     Yields:
         採点結果のストリーミングチャンク
@@ -525,6 +706,10 @@ def score_exam_style_stream(content, translation, opinion, format_type, task_ins
         yield type('ErrorChunk', (), {'text': "❌ 入力エラー: 意見を入力してください（最低50文字）。"})()
         return
 
+    # 採点開始時間記録
+    start_time = datetime.now()
+    full_response = ""
+    
     # リトライ機能付きの採点関数を定義
     def _score_exam_style_internal():
         try:
@@ -555,8 +740,46 @@ def score_exam_style_stream(content, translation, opinion, format_type, task_ins
             
             raise ScoringError(error_msg)
     
-    # リトライ機能付きでストリーミング実行
-    yield from score_with_retry_stream(_score_exam_style_internal)
+    # ストリーミング実行とレスポンス収集
+    try:
+        for chunk in score_with_retry_stream(_score_exam_style_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
+    except Exception as e:
+        yield type('ErrorChunk', (), {'text': f"❌ 採点エラー: {str(e)}"})()
+        return
+    
+    # 採点完了後の処理
+    if save_to_db and full_response:
+        try:
+            # スコア解析
+            parsed_result = parse_score_from_response(full_response)
+            
+            # 入力データ準備
+            inputs = {
+                'content': content,
+                'translation': translation,
+                'opinion': opinion,
+                'format_type': format_type,
+                'task_instruction': task_instruction
+            }
+            
+            # データベースに保存
+            save_scoring_result(
+                exercise_type='english_reading_practice',  # 新DBに存在するタイプ名
+                inputs=inputs,
+                scores=parsed_result['scores'],
+                feedback=parsed_result['feedback']
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 採点結果保存エラー: {e}")
+    
+    # 採点時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 採点時間: {duration:.2f}秒")
 
 def get_reading_score_distribution():
     """

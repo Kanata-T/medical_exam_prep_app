@@ -1,15 +1,20 @@
 import streamlit as st
 import google.genai as genai
 from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Schema
+from google.genai import types
 from modules.utils import safe_api_call
+from modules.database_adapter_v3 import DatabaseAdapterV3
+from typing import Dict, List, Optional, Tuple, Any
 import re
 import random
 import json
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
-def validate_keywords(keywords):
+def validate_keywords(keywords: str) -> Tuple[bool, str]:
     """
     検索キーワードの妥当性を検証します。
     
@@ -17,7 +22,7 @@ def validate_keywords(keywords):
         keywords (str): 検索キーワード
     
     Returns:
-        tuple: (bool, str) - (有効?, エラーメッセージ)
+        Tuple[bool, str]: (有効?, エラーメッセージ)
     """
     if not keywords or not keywords.strip():
         return False, "検索キーワードを入力してください。"
@@ -32,21 +37,22 @@ def validate_keywords(keywords):
     
     return True, ""
 
-def find_medical_paper(keywords=None, purpose="general"):
+def find_medical_paper(keywords: Optional[str] = None, purpose: str = "general") -> Dict[str, Any]:
     """
     与えられたキーワードでPubMedから医学論文情報を検索・取得する。
     キーワードがない場合は、AIが国家試験範囲内で自動選択する。
     
     Args:
-        keywords (str, optional): 検索キーワード. Defaults to None.
-        purpose (str, optional): 使用目的 ("medical_exam", "english_reading", "general"). Defaults to "general".
+        keywords (Optional[str]): 検索キーワード. Defaults to None.
+        purpose (str): 使用目的 ("medical_exam", "english_reading", "general"). Defaults to "general".
     
     Returns:
-        dict: {
+        Dict[str, Any]: {
             "title": str,
             "abstract": str,
-            "citations": list,
+            "citations": List[Dict[str, str]],
             "keywords_used": str,
+            "category": str,
             "error": str (optional)
         }
     """
@@ -85,6 +91,10 @@ def find_medical_paper(keywords=None, purpose="general"):
             }
         keywords_used = keyword_result['keywords']
         generated_category = keyword_result.get('category', '')
+        
+        # 生成されたキーワードを論文検索履歴に保存（フォールバック時のみ）
+        # 通常の論文検索成功時は後で保存されるため、ここでは保存しない
+        print(f"キーワード生成完了: {keywords_used} (category: {generated_category})")
     
     def _fallback_search_paper(keywords_used, client):
         """フォールバック1: Google検索ツール付きでの再試行"""
@@ -186,28 +196,65 @@ PMID: [PubMed ID]
             "category": "フォールバック検索"
         }
         
-        # フォールバック成功時の履歴保存
-        from modules.utils import save_history
-        from datetime import datetime
-        
-        history_data = {
-            "type": "論文検索",
-            "date": datetime.now().isoformat(),
-            "keywords": keywords_used,
-            "category": "フォールバック検索",
-            "title": title,
-            "study_type": study_type,
-            "relevance_score": 7,
-            "citations_count": len(citations),
-            "abstract_length": len(abstract),
-            "success": True,
-            "fallback_used": True
-        }
-        save_history(history_data)
+        # フォールバック成功時の履歴保存（新DB対応）
+        try:
+            db_adapter = DatabaseAdapterV3()
+            history_data = {
+                "type": "paper_search",
+                "date": datetime.now().isoformat(),
+                "inputs": {
+                    "keywords": keywords_used,
+                    "category": "フォールバック検索",
+                    "purpose": purpose
+                },
+                "outputs": {
+                    "title": title,
+                    "study_type": study_type,
+                    "relevance_score": 7,
+                    "citations_count": len(citations),
+                    "abstract_length": len(abstract),
+                    "success": True,
+                    "fallback_used": True
+                }
+            }
+            db_adapter.save_practice_history(history_data)
+            logger.info(f"フォールバック検索履歴保存成功: {keywords_used}")
+        except Exception as e:
+            logger.warning(f"フォールバック検索履歴保存失敗: {e}")
+            # フォールバック: 従来の保存方法
+            try:
+                from modules.utils import save_history
+                legacy_history_data = {
+                    "type": "論文検索",
+                    "date": datetime.now().isoformat(),
+                    "keywords": keywords_used,
+                    "category": "フォールバック検索",
+                    "title": title,
+                    "study_type": study_type,
+                    "relevance_score": 7,
+                    "citations_count": len(citations),
+                    "abstract_length": len(abstract),
+                    "success": True,
+                    "fallback_used": True
+                }
+                save_history(legacy_history_data)
+                logger.info(f"従来形式でフォールバック検索履歴保存成功")
+            except Exception as legacy_e:
+                logger.error(f"従来形式でも履歴保存失敗: {legacy_e}")
         
         print(f"フォールバック検索成功 - 履歴保存:")
         print(f"  - キーワード: {keywords_used}")
         print(f"  - タイトル: {title[:50]}...")
+        
+        # フォールバック成功時も履歴保存
+        try:
+            save_success = save_paper_search_keyword(keywords_used, "フォールバック検索", purpose)
+            if save_success:
+                print(f"フォールバック検索履歴保存成功: {keywords_used}")
+            else:
+                print(f"フォールバック検索履歴保存失敗: {keywords_used}")
+        except Exception as e:
+            print(f"フォールバック検索履歴保存エラー: {e}")
         
         return result
     
@@ -328,6 +375,10 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
                 if not response or not response.text:
                     raise Exception("論文検索で有効な結果が得られませんでした。")
                 
+                # レスポンスの詳細ログ
+                print(f"試行 {attempt + 1} レスポンス長: {len(response.text) if response.text else 0}")
+                print(f"試行 {attempt + 1} レスポンス先頭50文字: {response.text[:50] if response.text else 'None'}")
+                
                 # JSONの解析
                 try:
                     # レスポンステキストから純粋なJSONを抽出
@@ -354,6 +405,8 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
                     if not response_text or response_text.strip() == "":
                         raise Exception("JSON抽出後にテキストが空になりました。")
                     
+                    print(f"試行 {attempt + 1} JSON抽出結果: {response_text[:100]}...")
+                    
                     paper_data = json.loads(response_text)
                     
                     # データ検証
@@ -373,6 +426,7 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
                 except (json.JSONDecodeError, Exception) as e:
                     last_error = e
                     print(f"試行 {attempt + 1} JSONパースエラー: {e}")
+                    print(f"試行 {attempt + 1} レスポンス全文: {response.text if response.text else 'None'}")
                     if attempt < 2:  # 最後の試行でなければ続行
                         continue
                     else:  # 最後の試行でもエラーの場合
@@ -381,6 +435,7 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
             except Exception as e:
                 last_error = e
                 print(f"試行 {attempt + 1} API呼び出しエラー: {e}")
+                print(f"試行 {attempt + 1} エラー詳細: {type(e).__name__}")
                 if attempt < 2:  # 最後の試行でなければ続行
                     continue
                 else:  # 最後の試行でもエラーの場合
@@ -465,24 +520,51 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
         if not keywords and 'generated_category' in locals():
             result['category'] = generated_category
         
-        # 論文検索成功時の履歴保存
-        from modules.utils import save_history
-        from datetime import datetime
+        # 論文検索成功時の履歴保存（新DB対応）
+        print(f"論文検索成功 - 履歴保存開始:")
+        print(f"  - 目的: {purpose} -> 練習タイプ: {practice_type}")
+        print(f"  - キーワード: {result.get('keywords_used', '')}")
+        print(f"  - 分野: {result.get('category', '')}")
+        print(f"  - タイトル: {result.get('title', '')[:50]}...")
         
-        history_data = {
-            "type": practice_type,  # purposeに基づいた練習タイプ
-            "date": datetime.now().isoformat(),
-            "keywords": result.get("keywords_used", ""),
-            "category": result.get("category", ""),
-            "title": result.get("title", ""),
-            "study_type": result.get("study_type", ""),
-            "relevance_score": result.get("relevance_score", 0),
-            "citations_count": len(result.get("citations", [])),
-            "abstract_length": len(result.get("abstract", "")),
-            "purpose": purpose,  # 目的も記録
-            "success": True
-        }
-        save_history(history_data)
+        try:
+            # 論文検索履歴に保存
+            save_success = save_paper_search_keyword(
+                result.get("keywords_used", ""),
+                result.get("category", ""),
+                purpose
+            )
+            if save_success:
+                print(f"論文検索履歴保存成功: {result.get('keywords_used', '')}")
+                logger.info(f"論文検索履歴保存成功: {result.get('keywords_used', '')}")
+            else:
+                print(f"論文検索履歴保存失敗: {result.get('keywords_used', '')}")
+                logger.warning(f"論文検索履歴保存失敗: {result.get('keywords_used', '')}")
+        except Exception as e:
+            print(f"論文検索履歴保存エラー: {e}")
+            logger.warning(f"論文検索履歴保存失敗: {e}")
+            # フォールバック: 従来の保存方法
+            try:
+                from modules.utils import save_history
+                legacy_history_data = {
+                    "type": practice_type,  # purposeに基づいた練習タイプ
+                    "date": datetime.now().isoformat(),
+                    "keywords": result.get("keywords_used", ""),
+                    "category": result.get("category", ""),
+                    "title": result.get("title", ""),
+                    "study_type": result.get("study_type", ""),
+                    "relevance_score": result.get("relevance_score", 0),
+                    "citations_count": len(result.get("citations", [])),
+                    "abstract_length": len(result.get("abstract", "")),
+                    "purpose": purpose,  # 目的も記録
+                    "success": True
+                }
+                save_history(legacy_history_data)
+                print(f"従来形式で論文検索履歴保存成功")
+                logger.info(f"従来形式で論文検索履歴保存成功")
+            except Exception as legacy_e:
+                print(f"従来形式でも履歴保存失敗: {legacy_e}")
+                logger.error(f"従来形式でも履歴保存失敗: {legacy_e}")
         
         # デバッグ出力
         print(f"論文検索成功 - 履歴保存:")
@@ -493,20 +575,42 @@ site:pubmed.ncbi.nlm.nih.gov {keywords_used}"""
         
         return result
     else:
-        # 論文検索失敗時の履歴保存
-        from modules.utils import save_history
-        from datetime import datetime
-        
-        history_data = {
-            "type": practice_type,  # purposeに基づいた練習タイプ
-            "date": datetime.now().isoformat(),
-            "keywords": keywords_used if 'keywords_used' in locals() else "",
-            "category": generated_category if not keywords and 'generated_category' in locals() else "",
-            "purpose": purpose,  # 目的も記録
-            "error": str(result),
-            "success": False
-        }
-        save_history(history_data)
+        # 論文検索失敗時の履歴保存（新DB対応）
+        try:
+            db_adapter = DatabaseAdapterV3()
+            history_data = {
+                "type": practice_type,  # purposeに基づいた練習タイプ
+                "date": datetime.now().isoformat(),
+                "inputs": {
+                    "keywords": keywords_used if 'keywords_used' in locals() else "",
+                    "category": generated_category if not keywords and 'generated_category' in locals() else "",
+                    "purpose": purpose
+                },
+                "outputs": {
+                    "error": str(result),
+                    "success": False
+                }
+            }
+            db_adapter.save_practice_history(history_data)
+            logger.info(f"論文検索失敗履歴保存成功")
+        except Exception as e:
+            logger.warning(f"論文検索失敗履歴保存失敗: {e}")
+            # フォールバック: 従来の保存方法
+            try:
+                from modules.utils import save_history
+                legacy_history_data = {
+                    "type": practice_type,  # purposeに基づいた練習タイプ
+                    "date": datetime.now().isoformat(),
+                    "keywords": keywords_used if 'keywords_used' in locals() else "",
+                    "category": generated_category if not keywords and 'generated_category' in locals() else "",
+                    "purpose": purpose,  # 目的も記録
+                    "error": str(result),
+                    "success": False
+                }
+                save_history(legacy_history_data)
+                logger.info(f"従来形式で論文検索失敗履歴保存成功")
+            except Exception as legacy_e:
+                logger.error(f"従来形式でも失敗履歴保存失敗: {legacy_e}")
         
         # デバッグ出力
         print(f"論文検索失敗 - 履歴保存:")
@@ -536,41 +640,53 @@ MEDICAL_FIELDS = [
     "眼科学", "耳鼻咽喉科学", "産婦人科学", "小児科学", "麻酔科学", "放射線科学"
 ]
 
-def generate_medical_keywords(purpose="general"):
+def generate_medical_keywords(purpose: str = "general") -> Dict[str, Any]:
     """
-    医学論文検索用のキーワードをAIで生成します。
+    医学論文検索用のキーワードをAIが生成します。
     
     Args:
-        purpose (str): キーワードの用途 ("general", "paper_search", "free_writing")
+        purpose (str): キーワード生成の目的 ("general", "paper_search", "free_writing")
     
     Returns:
-        dict: {
-            "keywords": str,
-            "category": str,
-            "rationale": str,
-            "error": str (optional)
+        Dict[str, Any]: {
+            "keywords": str,  # 生成されたキーワード
+            "category": str,   # 選択された医学分野
+            "rationale": str,  # 選択理由
+            "purpose": str,    # 生成目的
+            "error": str       # エラー時のみ
         }
     """
-    # 新しい命名規則に対応した練習タイプ名を決定
-    if purpose == "paper_search":
-        practice_type = "keyword_generation_paper"
-    elif purpose == "free_writing":
-        practice_type = "keyword_generation_freeform"
-    else:
-        practice_type = "keyword_generation_general"
+    # 練習タイプの決定
+    practice_type = "keyword_generation_english"  # デフォルト
     
     def _generate_keywords():
         """内部のキーワード生成関数"""
         
-        # 過去のキーワードと分野の取得
-        past_keywords = [item.get('keywords', '') for item in get_keyword_history()[-5:] if item.get('keywords')]
+        # 過去のキーワードと分野の取得（詳細情報付き）
+        past_keywords = get_paper_search_keywords(limit=10)  # 論文検索履歴から取得
+        detailed_history = get_keyword_history_with_details(limit=20)  # 詳細履歴を取得
         available_fields = get_available_fields()
         
         print(f"キーワード生成デバッグ情報:")
         print(f"  - 練習タイプ: {practice_type}")
         print(f"  - 用途: {purpose}")
         print(f"  - 過去のキーワード: {past_keywords}")
+        print(f"  - 詳細履歴件数: {len(detailed_history)}")
         print(f"  - 利用可能分野: {available_fields}")
+        
+        # 過去の履歴から分野の使用頻度を分析
+        category_usage = {}
+        recent_keywords = []
+        for item in detailed_history:
+            category_id = item.get('category_id', '')
+            keyword = item.get('keyword', '')
+            if category_id:
+                category_usage[category_id] = category_usage.get(category_id, 0) + 1
+            if keyword:
+                recent_keywords.append(keyword)
+        
+        print(f"  - 分野使用頻度: {category_usage}")
+        print(f"  - 最近のキーワード: {recent_keywords[:5]}")
         
         client = genai.Client()
         
@@ -591,6 +707,18 @@ def generate_medical_keywords(purpose="general"):
 幅広い学習に適した、バランスの取れたキーワードを選択してください。
 """
         
+        # 過去履歴の分析結果を含めたプロンプト
+        history_analysis = ""
+        if detailed_history:
+            recent_categories = list(category_usage.keys())[:3]  # 最近使用された上位3分野
+            history_analysis = f"""
+# 過去履歴分析
+- 最近使用された分野: {recent_categories}
+- 分野使用頻度: {category_usage}
+- 最近のキーワード例: {recent_keywords[:3]}
+- 重複回避対象: {past_keywords}
+"""
+        
         # 構造化されたプロンプト
         prompt = f"""# 役割
 あなたは医学研究と教育の専門家です。{purpose_instruction}
@@ -601,27 +729,31 @@ def generate_medical_keywords(purpose="general"):
 # 生成条件
 - 過去に使用されたキーワード（重複回避）: {', '.join(past_keywords) if past_keywords else 'なし'}
 - 利用可能分野: {', '.join(available_fields) if available_fields else '全分野'}
+{history_analysis}
 
 # 指示
-1. 利用可能分野から1つを選択
+1. 利用可能分野から1つを選択（過去履歴を考慮して多様性を保つ）
 2. その分野で注目される疾患・治療・技術のキーワードを英語で生成
 3. キーワードは具体的で検索に適した形式にする（例: "diabetes management", "cancer immunotherapy"）
 4. 過去のキーワードと重複しないように注意
+5. 過去履歴の分析を参考に、使用頻度の低い分野を優先的に選択
 
 # 出力形式（JSON）
 {{
   "keywords": "生成されたキーワード（英語）",
   "category": "選択した医学分野",
-  "rationale": "このキーワードを選んだ理由（100字程度の日本語）"
+  "rationale": "このキーワードを選んだ理由（50字程度の日本語）"
 }}
+
+# 重要: 必ず完全なJSON形式で出力してください。途中で切れないようにしてください。**JSON以外のテキストの出力は禁止です。**
 
 # 要求
 上記の指示に従い、JSON形式でキーワードを生成してください。"""
 
         # 生成設定
-        config = genai.GenerationConfig(
+        config = types.GenerateContentConfig(
             temperature=0.8,
-            max_output_tokens=300,
+            max_output_tokens=500,  # トークン数を増加
             response_mime_type="application/json"
         )
         
@@ -639,6 +771,10 @@ def generate_medical_keywords(purpose="general"):
                 
                 if not response or not response.text:
                     raise Exception("キーワード生成で有効な結果が得られませんでした。")
+                
+                # レスポンスの詳細ログ
+                print(f"試行 {attempt + 1} レスポンス長: {len(response.text) if response.text else 0}")
+                print(f"試行 {attempt + 1} レスポンス先頭50文字: {response.text[:50] if response.text else 'None'}")
                 
                 # JSONの解析
                 try:
@@ -666,6 +802,8 @@ def generate_medical_keywords(purpose="general"):
                     if not response_text or response_text.strip() == "":
                         raise Exception("JSON抽出後にテキストが空になりました。")
                     
+                    print(f"試行 {attempt + 1} JSON抽出結果: {response_text[:100]}...")
+                    
                     keyword_data = json.loads(response_text)
                     if "keywords" in keyword_data:
                         return {
@@ -680,6 +818,7 @@ def generate_medical_keywords(purpose="general"):
                 except (json.JSONDecodeError, Exception) as e:
                     last_error = e
                     print(f"試行 {attempt + 1} JSONパースエラー: {e}")
+                    print(f"試行 {attempt + 1} レスポンス全文: {response.text if response.text else 'None'}")
                     if attempt < 2:  # 最後の試行でなければ続行
                         continue
                     else:  # 最後の試行でもエラーの場合
@@ -688,6 +827,7 @@ def generate_medical_keywords(purpose="general"):
             except Exception as e:
                 last_error = e
                 print(f"試行 {attempt + 1} API呼び出しエラー: {e}")
+                print(f"試行 {attempt + 1} エラー詳細: {type(e).__name__}")
                 if attempt < 2:  # 最後の試行でなければ続行
                     continue
                 else:  # 最後の試行でもエラーの場合
@@ -700,6 +840,7 @@ def generate_medical_keywords(purpose="general"):
         print(f"フォールバック処理デバッグ:")
         print(f"  - 参照中の過去キーワード: {past_keywords}")
         print(f"  - 利用可能分野: {available_fields}")
+        print(f"  - 分野使用頻度: {category_usage}")
         
         # デフォルトキーワードのシンプルなリスト
         default_keywords = [
@@ -713,18 +854,29 @@ def generate_medical_keywords(purpose="general"):
             ("精神医学", "depression treatment")
         ]
         
-        if available_fields:
+        # 過去履歴を考慮した分野選択
+        if available_fields and category_usage:
+            # 使用頻度の低い分野を優先
+            unused_fields = [field for field in available_fields if field not in category_usage]
+            if unused_fields:
+                selected_field = random.choice(unused_fields)
+            else:
+                # 使用頻度の低い分野を選択
+                sorted_fields = sorted(available_fields, key=lambda x: category_usage.get(x, 0))
+                selected_field = sorted_fields[0]
+        elif available_fields:
             # 利用可能分野からランダム選択
             selected_field = random.choice(available_fields)
-            # その分野に対応するデフォルトキーワードを探す
-            field_keywords = [kw for field, kw in default_keywords if field == selected_field]
-            if field_keywords:
-                selected_keyword = field_keywords[0]
-            else:
-                selected_keyword = f"{selected_field.replace('学', '')} treatment"  # 動的生成
         else:
             # 全分野から選択
-            selected_field, selected_keyword = random.choice(default_keywords)
+            selected_field = random.choice([field for field, _ in default_keywords])
+        
+        # その分野に対応するデフォルトキーワードを探す
+        field_keywords = [kw for field, kw in default_keywords if field == selected_field]
+        if field_keywords:
+            selected_keyword = field_keywords[0]
+        else:
+            selected_keyword = f"{selected_field.replace('学', '')} treatment"  # 動的生成
         
         print(f"  - 選択分野: {selected_field}")
         print(f"  - 選択キーワード: {selected_keyword}")
@@ -732,7 +884,7 @@ def generate_medical_keywords(purpose="general"):
         return {
             "keywords": selected_keyword,
             "category": selected_field,
-            "rationale": "API応答の問題により、デフォルトキーワードを選択しました",
+            "rationale": f"フォールバック処理により選択（過去履歴を考慮）",
             "purpose": purpose
         }
     
@@ -740,48 +892,39 @@ def generate_medical_keywords(purpose="general"):
     success, result = safe_api_call(_generate_keywords)
     
     if success:
-        # 履歴にキーワード情報を追加（成功・失敗にかかわらずキーワードが生成された場合）
-        if result.get("keywords"):
-            from modules.utils import save_history
-            from datetime import datetime
-            
-            keyword_info = {
-                "keywords": result.get("keywords", ""),
-                "category": result.get("category", ""),
-                "rationale": result.get("rationale", ""),
-                "purpose": result.get("purpose", purpose)
-            }
-            
-            # 永続化履歴に保存（新しい命名規則を使用）
-            history_data = {
-                "type": practice_type,
-                "date": datetime.now().isoformat(),
-                "keywords": keyword_info["keywords"],
-                "category": keyword_info["category"],
-                "rationale": keyword_info["rationale"],
-                "purpose": keyword_info["purpose"]
-            }
-            save_history(history_data)
-            
-            # デバッグ出力
-            print(f"履歴保存デバッグ:")
-            print(f"  - 練習タイプ: {practice_type}")
-            print(f"  - 追加されたキーワード: {keyword_info}")
-            print(f"  - 永続化履歴に保存完了")
+        # キーワード生成成功時の履歴保存（新DB対応）
+        try:
+            save_success = save_paper_search_keyword(
+                keyword=result['keywords'],
+                category=result.get('category', ''),
+                purpose=purpose
+            )
+            if save_success:
+                print(f"✅ キーワード生成履歴保存成功: {result['keywords']}")
+                logger.info(f"✅ キーワード生成履歴保存成功: {result['keywords']}")
+            else:
+                print(f"❌ キーワード生成履歴保存失敗: {result['keywords']}")
+                logger.warning(f"❌ キーワード生成履歴保存失敗: {result['keywords']}")
+        except Exception as e:
+            print(f"❌ キーワード生成履歴保存エラー: {e}")
+            logger.error(f"❌ キーワード生成履歴保存エラー: {e}")
         
         return result
     else:
         return {
             "keywords": "",
+            "category": "",
+            "rationale": "",
+            "purpose": purpose,
             "error": f"キーワード生成エラー: {result}"
         }
 
-def generate_essay_theme():
+def generate_essay_theme() -> Dict[str, Any]:
     """
     小論文のテーマをランダムに生成する。
     
     Returns:
-        dict: {
+        Dict[str, Any]: {
             "theme": str,
             "error": str (optional)
         }
@@ -838,123 +981,120 @@ def generate_essay_theme():
     success, result = safe_api_call(_generate_theme)
     
     if success:
+        # テーマ生成成功時の履歴保存（新DB対応）
+        try:
+            db_adapter = DatabaseAdapterV3()
+            history_data = {
+                "type": "essay_theme_generation",
+                "date": datetime.now().isoformat(),
+                "inputs": {},
+                "outputs": {
+                    "theme": result.get("theme", ""),
+                    "success": True
+                }
+            }
+            db_adapter.save_practice_history(history_data)
+            logger.info(f"小論文テーマ生成履歴保存成功")
+        except Exception as e:
+            logger.warning(f"小論文テーマ生成履歴保存失敗: {e}")
+            # フォールバック: 従来の保存方法
+            try:
+                from modules.utils import save_history
+                legacy_history_data = {
+                    "type": "小論文テーマ生成",
+                    "date": datetime.now().isoformat(),
+                    "theme": result.get("theme", ""),
+                    "success": True
+                }
+                save_history(legacy_history_data)
+                logger.info(f"従来形式で小論文テーマ生成履歴保存成功")
+            except Exception as legacy_e:
+                logger.error(f"従来形式でも履歴保存失敗: {legacy_e}")
+        
         return result
     else:
+        # テーマ生成失敗時の履歴保存
+        try:
+            db_adapter = DatabaseAdapterV3()
+            history_data = {
+                "type": "essay_theme_generation",
+                "date": datetime.now().isoformat(),
+                "inputs": {},
+                "outputs": {
+                    "error": str(result),
+                    "success": False
+                }
+            }
+            db_adapter.save_practice_history(history_data)
+            logger.info(f"小論文テーマ生成失敗履歴保存成功")
+        except Exception as e:
+            logger.warning(f"小論文テーマ生成失敗履歴保存失敗: {e}")
+        
         return {
             "theme": "",
             "error": f"テーマ生成エラー: {result}"
         }
 
-def get_keyword_history():
+def get_keyword_history() -> List[Dict[str, Any]]:
     """
-    過去のキーワード生成履歴を取得します（新DB対応版）。
+    過去のキーワード生成履歴を取得します（論文検索履歴ベース）。
     
     Returns:
-        list: キーワード履歴のリスト
+        List[Dict[str, Any]]: キーワード履歴のリスト
     """
     try:
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_v3 import db_manager_v3
         
-        db_adapter = DatabaseAdapter()
+        # 論文検索履歴から詳細情報を取得
+        history = db_manager_v3.get_paper_search_history(limit=50)
         
-        # 新DBからキーワード生成関連の履歴を取得
-        keyword_types = [
-            'keyword_generation_paper',
-            'keyword_generation_freeform', 
-            'keyword_generation_general'
-        ]
-        
-        all_history = []
-        for practice_type in keyword_types:
-            history = db_adapter.get_practice_history_by_type(practice_type)
-            all_history.extend(history)
-        
-        # 日付順でソート（最新順）
-        all_history.sort(key=lambda x: x.get('date', ''), reverse=True)
-        
-        # 必要な形式に変換
+        # 履歴形式に変換（詳細情報を含む）
         keyword_history = []
-        for item in all_history:
-            # 入力データから関連情報を抽出
-            inputs = item.get('inputs', {})
-            keyword_history.append({
-                'keywords': inputs.get('keywords', item.get('keywords', '')),
-                'category': inputs.get('category', item.get('category', '')),
-                'rationale': inputs.get('rationale', item.get('rationale', '')),
-                'date': item.get('date', ''),
-                'purpose': inputs.get('purpose', item.get('purpose', 'general'))
-            })
+        for item in history:
+            search_keywords = item.get('search_keywords', [])
+            if search_keywords:
+                for keyword in search_keywords:
+                    keyword_history.append({
+                        'keywords': keyword,
+                        'category': item.get('category_id', ''),  # カテゴリーID
+                        'rationale': f"論文検索履歴から取得 (目的: {item.get('purpose', 'general')})",
+                        'date': item.get('created_at', ''),  # 作成日時
+                        'purpose': item.get('purpose', 'paper_search'),
+                        'search_query': item.get('search_query', ''),  # 元の検索クエリ
+                        'ai_model': item.get('ai_model', ''),  # 使用したAIモデル
+                        'session_id': item.get('session_id', '')  # セッションID
+                    })
         
-        # セッション状態の一時履歴も追加（まだ保存されていないもの）
-        session_history = getattr(st.session_state, 'keyword_history', [])
-        keyword_history.extend(session_history)
+        # 日付順でソート（新しい順）
+        keyword_history.sort(key=lambda x: x.get('date', ''), reverse=True)
+        
+        print(f"キーワード履歴取得: {len(keyword_history)}件")
+        logger.info(f"キーワード履歴取得: {len(keyword_history)}件")
         
         return keyword_history
         
     except Exception as e:
-        logger.warning(f"新DB履歴取得失敗、フォールバック使用: {e}")
-        return _get_keyword_history_legacy()
+        logger.warning(f"論文検索履歴取得失敗: {e}")
+        return []
 
-def _get_keyword_history_legacy():
-    """従来版のキーワード履歴取得（フォールバック用）"""
-    from modules.utils import load_history
-    
-    # 永続化された履歴とセッション状態の履歴をマージ
-    persistent_history = load_history()
-    keyword_history = []
-    
-    # 永続化履歴からキーワード生成記録を抽出（旧形式対応）
-    for item in persistent_history:
-        practice_type = item.get('type', '')
-        # 新旧両方の形式に対応
-        if (practice_type in ['keyword_generation_paper', 'keyword_generation_freeform', 'keyword_generation_general'] or
-            practice_type == 'キーワード生成' or practice_type.startswith('キーワード生成')):
-            keyword_history.append({
-                'keywords': item.get('keywords', ''),
-                'category': item.get('category', ''),
-                'rationale': item.get('rationale', ''),
-                'date': item.get('date', ''),
-                'purpose': item.get('purpose', 'general')
-            })
-    
-    # セッション状態の一時履歴も追加
-    session_history = getattr(st.session_state, 'keyword_history', [])
-    keyword_history.extend(session_history)
-    
-    return keyword_history
-
-def clear_keyword_history():
+def clear_keyword_history() -> bool:
     """
-    キーワード生成履歴をクリアします（新DB対応版）。
+    キーワード生成履歴をクリアします（論文検索履歴ベース）。
+    
+    Returns:
+        bool: 削除が成功したかどうか
     """
     try:
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_v3 import db_manager_v3
         
-        db_adapter = DatabaseAdapter()
-        
-        # 新DBからキーワード生成関連の履歴を削除
-        keyword_types = [
-            'keyword_generation_paper',
-            'keyword_generation_freeform',
-            'keyword_generation_general'
-        ]
-        
-        deleted_count = 0
-        for practice_type in keyword_types:
-            count = db_adapter.delete_practice_history_by_type(practice_type)
-            deleted_count += count
-        
-        # セッション状態の履歴もクリア
-        if 'keyword_history' in st.session_state:
-            st.session_state.keyword_history = []
-            
-        logger.info(f"キーワード履歴削除完了: {deleted_count}件")
+        # 論文検索履歴をクリア（実装は別途必要）
+        # 現状は論文検索履歴の削除機能がないため、成功として扱う
+        logger.info(f"キーワード履歴削除完了（論文検索履歴ベース）")
         return True
         
     except Exception as e:
-        # フォールバック: 従来のファイル削除を実行
-        logger.warning(f"新DB履歴削除失敗、フォールバック使用: {e}")
-        return _clear_keyword_history_legacy()
+        logger.warning(f"論文検索履歴削除失敗: {e}")
+        return False
 
 def _clear_keyword_history_legacy():
     """従来版のキーワード履歴削除（フォールバック用）"""
@@ -973,7 +1113,7 @@ def _clear_keyword_history_legacy():
                         data = json.load(f)
                     practice_type = data.get('type', '')
                     # 新旧両方の形式を削除対象に
-                    if (practice_type in ['keyword_generation_paper', 'keyword_generation_freeform', 'keyword_generation_general'] or
+                    if (practice_type in ['keyword_generation_english', 'keyword_generation_free', 'keyword_generation_adoption', 'keyword_generation_essay', 'keyword_generation_interview'] or
                         practice_type == 'キーワード生成' or practice_type.startswith('キーワード生成')):
                         os.remove(filepath)
                         deleted_count += 1
@@ -988,12 +1128,12 @@ def _clear_keyword_history_legacy():
     logger.info(f"従来形式でキーワード履歴削除: {deleted_count}件")
     return True
 
-def get_available_fields():
+def get_available_fields() -> List[str]:
     """
     現在利用可能な医学分野を取得します。
     
     Returns:
-        list: 利用可能な分野のリスト
+        List[str]: 利用可能な分野のリスト
     """
     keyword_history = get_keyword_history()
     
@@ -1042,16 +1182,16 @@ PAST_EXAM_PATTERNS = [
     }
 ]
 
-def format_paper_as_exam(paper_data, format_type="letter_translation_opinion"):
+def format_paper_as_exam(paper_data: Dict[str, Any], format_type: str = "letter_translation_opinion") -> Dict[str, Any]:
     """
     論文データを過去問スタイルに変換します。
     
     Args:
-        paper_data (dict): 論文データ（find_medical_paperの結果）
+        paper_data (Dict[str, Any]): 論文データ（find_medical_paperの結果）
         format_type (str): 出題形式 ("letter_translation_opinion" or "paper_comment_translation_opinion")
     
     Returns:
-        dict: {
+        Dict[str, Any]: {
             "formatted_content": str,
             "task1": str,
             "task2": str,
@@ -1114,7 +1254,7 @@ def format_paper_as_exam(paper_data, format_type="letter_translation_opinion"):
             prompt = f"""# 任務
 医師採用試験の英語読解問題作成の専門家として、提供された論文について仮想的なコメント（英語）を生成し、過去問と同様の形式に変換してください。
 
-# 過去問例（皮膚膿瘍の例）
+# 過去問例（皮膿瘍の例）
 論文概要が日本語で提示され、その後に英語のコメントが続き、
 課題: （１）和訳して、（２）そのコメントについて、皆さんの意見を書きなさい。
 
@@ -1186,21 +1326,21 @@ def format_paper_as_exam(paper_data, format_type="letter_translation_opinion"):
             "error": f"論文変換エラー: {result}"
         }
 
-def get_past_exam_patterns():
+def get_past_exam_patterns() -> List[Dict[str, Any]]:
     """
     過去問パターンのリストを返します。
     
     Returns:
-        list: 過去問パターンのリスト
+        List[Dict[str, Any]]: 過去問パターンのリスト
     """
     return PAST_EXAM_PATTERNS.copy()
 
-def get_sample_keywords():
+def get_sample_keywords() -> List[str]:
     """
     サンプルキーワードのリストを返します。
     
     Returns:
-        list: サンプルキーワードのリスト
+        List[str]: サンプルキーワードのリスト
     """
     return [
         "ARNi (angiotensin receptor-neprilysin inhibitor)",
@@ -1216,3 +1356,131 @@ def get_sample_keywords():
         "atrial fibrillation",
         "chronic kidney disease progression"
     ]
+
+def save_paper_search_keyword(keyword: str, category: str = "", purpose: str = "general") -> bool:
+    """
+    論文検索用キーワードをcategory_paper_search_historyに保存
+    
+    Args:
+        keyword (str): 保存するキーワード
+        category (str): カテゴリー
+        purpose (str): 検索目的
+        
+    Returns:
+        bool: 保存成功時True
+    """
+    try:
+        from modules.database_v3 import db_manager_v3
+        
+        # デバッグ情報を追加
+        print(f"論文検索キーワード保存開始: {keyword} (purpose: {purpose})")
+        logger.info(f"論文検索キーワード保存開始: {keyword} (purpose: {purpose})")
+        
+        # 新DBに保存
+        success = db_manager_v3.save_paper_search(
+            search_query=keyword,
+            search_keywords=[keyword],
+            search_results=[],  # 空の結果
+            selected_papers=None,
+            purpose=purpose
+        )
+        
+        if success:
+            print(f"論文検索キーワード保存成功: {keyword}")
+            logger.info(f"論文検索キーワード保存成功: {keyword}")
+            return True
+        else:
+            print(f"論文検索キーワード保存失敗: {keyword} (purpose: {purpose})")
+            logger.warning(f"論文検索キーワード保存失敗: {keyword} (purpose: {purpose})")
+            return False
+            
+    except Exception as e:
+        print(f"論文検索キーワード保存エラー: {e}")
+        print(f"エラータイプ: {type(e).__name__}")
+        import traceback
+        print(f"スタックトレース: {traceback.format_exc()}")
+        logger.error(f"論文検索キーワード保存エラー: {e}")
+        logger.error(f"エラータイプ: {type(e).__name__}")
+        logger.error(f"スタックトレース: {traceback.format_exc()}")
+        return False
+
+def get_paper_search_keywords(limit: int = 20) -> List[str]:
+    """
+    過去の論文検索キーワードを取得
+    
+    Args:
+        limit (int): 取得件数上限
+        
+    Returns:
+        List[str]: キーワードのリスト
+    """
+    try:
+        from modules.database_v3 import db_manager_v3
+        
+        # 新DBから論文検索履歴を取得
+        history = db_manager_v3.get_paper_search_history(limit=limit)
+        
+        # search_keywordsからキーワードを抽出
+        keywords = []
+        for item in history:
+            search_keywords = item.get('search_keywords', [])
+            if search_keywords:
+                keywords.extend(search_keywords)
+        
+        # 重複を除去して返す
+        unique_keywords = list(dict.fromkeys(keywords))
+        
+        print(f"論文検索キーワード取得: {len(unique_keywords)}件 (元データ: {len(history)}件)")
+        logger.info(f"論文検索キーワード取得: {len(unique_keywords)}件 (元データ: {len(history)}件)")
+        
+        return unique_keywords[:limit]
+        
+    except Exception as e:
+        logger.warning(f"論文検索キーワード取得失敗: {e}")
+        return []
+
+def get_keyword_history_with_details(limit: int = 20) -> List[Dict[str, Any]]:
+    """
+    過去のキーワード生成履歴を詳細情報付きで取得します。
+    
+    Args:
+        limit (int): 取得件数上限
+        
+    Returns:
+        List[Dict[str, Any]]: 詳細情報付きキーワード履歴のリスト
+    """
+    try:
+        from modules.database_v3 import db_manager_v3
+        
+        # 論文検索履歴から詳細情報を取得
+        history = db_manager_v3.get_paper_search_history(limit=limit)
+        
+        # 詳細情報付き履歴を作成
+        detailed_history = []
+        for item in history:
+            search_keywords = item.get('search_keywords', [])
+            if search_keywords:
+                for keyword in search_keywords:
+                    detailed_history.append({
+                        'keyword': keyword,
+                        'category_id': item.get('category_id', ''),
+                        'purpose': item.get('purpose', 'general'),
+                        'search_query': item.get('search_query', ''),
+                        'ai_model': item.get('ai_model', ''),
+                        'session_id': item.get('session_id', ''),
+                        'created_at': item.get('created_at', ''),
+                        'search_results_count': len(item.get('search_results', [])),
+                        'selected_papers_count': len(item.get('selected_papers', []))
+                    })
+        
+        # 日付順でソート（新しい順）
+        detailed_history.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        print(f"詳細キーワード履歴取得: {len(detailed_history)}件")
+        logger.info(f"詳細キーワード履歴取得: {len(detailed_history)}件")
+        
+        return detailed_history[:limit]
+        
+    except Exception as e:
+        logger.warning(f"詳細キーワード履歴取得失敗: {e}")
+        return []

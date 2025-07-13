@@ -9,6 +9,10 @@ import hashlib
 import time
 import random
 import uuid
+from typing import Dict, List, Optional, Tuple, Any, Union
+import logging
+
+logger = logging.getLogger(__name__)
 
 HISTORY_DIR = "history"
 SESSION_BACKUP_DIR = "session_backup"
@@ -18,7 +22,7 @@ for dir_path in [HISTORY_DIR, SESSION_BACKUP_DIR]:
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
-def get_session_id():
+def get_session_id() -> str:
     """
     現在のセッション用のユニークIDを生成します。
     
@@ -33,12 +37,12 @@ def get_session_id():
     
     return st.session_state.session_id
 
-def save_session_backup(session_data):
+def save_session_backup(session_data: Dict[str, Any]) -> None:
     """
     セッション状態をバックアップファイルに保存します。
     
     Args:
-        session_data (dict): 保存するセッションデータ
+        session_data (Dict[str, Any]): 保存するセッションデータ
     """
     try:
         session_id = get_session_id()
@@ -60,12 +64,12 @@ def save_session_backup(session_data):
     except Exception as e:
         st.warning(f"セッションバックアップの保存に失敗しました: {e}")
 
-def load_session_backup():
+def load_session_backup() -> Optional[Dict[str, Any]]:
     """
     セッション状態をバックアップファイルから復元します。
     
     Returns:
-        dict or None: 復元されたセッションデータ
+        Optional[Dict[str, Any]]: 復元されたセッションデータ
     """
     try:
         session_id = get_session_id()
@@ -80,7 +84,7 @@ def load_session_backup():
         st.warning(f"セッションバックアップの読み込みに失敗しました: {e}")
         return None
 
-def cleanup_old_session_backups(max_age_hours=24):
+def cleanup_old_session_backups(max_age_hours: int = 24) -> None:
     """
     古いセッションバックアップファイルを削除します。
     
@@ -104,7 +108,7 @@ def cleanup_old_session_backups(max_age_hours=24):
         # エラーは無視（クリーンアップ失敗は致命的ではない）
         pass
 
-def restore_exam_session():
+def restore_exam_session() -> bool:
     """
     試験セッションを復元します（リロード耐性）。
     
@@ -135,7 +139,7 @@ def restore_exam_session():
         st.warning(f"セッション復元中にエラーが発生しました: {e}")
         return False
 
-def auto_save_session():
+def auto_save_session() -> None:
     """
     セッション状態を自動保存します。
     """
@@ -170,13 +174,13 @@ def auto_save_session():
         # 自動保存のエラーは表示しない（UXを損なうため）
         pass
 
-def check_api_configuration():
+def check_api_configuration() -> Tuple[bool, str]:
     """
     Google Gemini APIの設定を確認し、適切にセットアップされているかチェックします。
     APIの疎通確認は行わず、キーの存在と形式のみをチェックします。
     
     Returns:
-        tuple: (bool, str) - (設定OK?, メッセージ)
+        Tuple[bool, str]: (設定OK?, メッセージ)
     """
     try:
         # 環境変数またはStreamlit secretsからAPIキーを確認
@@ -231,17 +235,17 @@ def show_api_setup_guide():
            - 設定後、Streamlitアプリを再起動してください
         """)
 
-def safe_api_call(func, *args, **kwargs):
+def safe_api_call(func: callable, *args: Any, **kwargs: Any) -> Tuple[bool, Any]:
     """
     API呼び出しを安全に実行し、エラーハンドリングを行います。
     
     Args:
-        func: 実行する関数
-        *args: 関数の引数
-        **kwargs: 関数のキーワード引数
+        func (callable): 実行する関数
+        *args (Any): 関数の引数
+        **kwargs (Any): 関数のキーワード引数
     
     Returns:
-        tuple: (bool, result) - (成功?, 結果またはエラーメッセージ)
+        Tuple[bool, Any]: (成功?, 結果またはエラーメッセージ)
     """
     try:
         result = func(*args, **kwargs)
@@ -250,8 +254,16 @@ def safe_api_call(func, *args, **kwargs):
         error_msg = f"API呼び出し中にエラーが発生しました: {str(e)}"
         return False, error_msg
 
-def save_history(data):
-    """Saves a record to the database or local directory as fallback."""
+def save_history(data: Dict[str, Any]) -> Optional[str]:
+    """
+    履歴データをデータベースまたはローカルディレクトリに保存します。
+    
+    Args:
+        data (Dict[str, Any]): 保存する履歴データ
+    
+    Returns:
+        Optional[str]: 保存されたファイル名、またはNone（失敗時）
+    """
     import logging
     logger = logging.getLogger(__name__)
     
@@ -263,7 +275,7 @@ def save_history(data):
     
     try:
         # 新しいデータベースアダプターシステムを使用
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         from modules.session_manager import StreamlitSessionManager
         
         # セッション管理の初期化と確認
@@ -286,7 +298,7 @@ def save_history(data):
         
         # データベースアダプターで保存
         logger.info("Creating DatabaseAdapter instance...")
-        db_adapter = DatabaseAdapter()
+        db_adapter = DatabaseAdapterV3()
         
         logger.info("Checking database availability...")
         if db_adapter.is_available():
@@ -329,8 +341,16 @@ def save_history(data):
             logger.info(f"=== SAVE_HISTORY FAILED ===")
             return None
 
-def _save_to_legacy_system(data):
-    """旧システム（ローカルファイル）への保存"""
+def _save_to_legacy_system(data: Dict[str, Any]) -> Optional[str]:
+    """
+    旧システム（ローカルファイル）への保存
+    
+    Args:
+        data (Dict[str, Any]): 保存するデータ
+    
+    Returns:
+        Optional[str]: 保存されたファイル名、またはNone（失敗時）
+    """
     import logging
     logger = logging.getLogger(__name__)
     
@@ -358,11 +378,16 @@ def _save_to_legacy_system(data):
         logger.error(f"Legacy system save failed: {e}")
         return None
 
-def load_history():
-    """Loads all history records from database or local directory as fallback."""
+def load_history() -> List[Dict[str, Any]]:
+    """
+    データベースまたはローカルディレクトリからすべての履歴レコードを読み込みます。
+    
+    Returns:
+        List[Dict[str, Any]]: 履歴レコードのリスト
+    """
     try:
         # 新しいデータベースアダプターシステムを使用
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         from modules.session_manager import StreamlitSessionManager
         
         # セッション管理の初期化と確認
@@ -376,7 +401,7 @@ def load_history():
             current_session = st.session_state.current_session
         
         # データベースアダプターで履歴取得
-        db_adapter = DatabaseAdapter()
+        db_adapter = DatabaseAdapterV3()
         user_history = db_adapter.get_user_history()
         
         # ログ情報
@@ -391,8 +416,13 @@ def load_history():
         # データベースモジュールが利用できない場合はローカルファイル読み込み
         return _load_history_local()
 
-def _load_history_local():
-    """Loads all history records from local directory (fallback)."""
+def _load_history_local() -> List[Dict[str, Any]]:
+    """
+    ローカルディレクトリからすべての履歴レコードを読み込みます（フォールバック）。
+    
+    Returns:
+        List[Dict[str, Any]]: 履歴レコードのリスト
+    """
     if not os.path.exists(HISTORY_DIR):
         return []
     history_files = sorted([f for f in os.listdir(HISTORY_DIR) if f.endswith('.json')], reverse=True)
@@ -405,10 +435,31 @@ def _load_history_local():
             st.error(f"履歴ファイル '{filename}' の読み込み中にエラーが発生しました: {e}")
     return history
 
-def extract_scores(feedback):
-    """Extracts scores from the feedback text by parsing a JSON block, with a regex fallback."""
+def extract_scores(feedback: str) -> Dict[str, int]:
+    """
+    フィードバックテキストからスコアを抽出します（JSONブロックの解析、正規表現フォールバック付き）。
+    
+    Args:
+        feedback (str): フィードバックテキスト
+    
+    Returns:
+        Dict[str, int]: 抽出されたスコアの辞書
+    """
     scores = {}
-    # Attempt to find and parse the JSON block
+    
+    # 1. 自由記述形式のJSONブロックを探す（## 📊 評価スコア の下）
+    json_match = re.search(r'## 📊 評価スコア\s*```json\s*({.*?})\s*```', feedback, re.DOTALL)
+    if json_match:
+        try:
+            scores = json.loads(json_match.group(1))
+            # Ensure all values are integers
+            for key, value in scores.items():
+                scores[key] = int(value)
+            return scores
+        except (json.JSONDecodeError, ValueError) as e:
+            st.warning(f"スコアのJSONパースまたは値変換中にエラーが発生しました。旧形式で抽出を試みます: {e}")
+    
+    # 2. 旧形式のスコアブロックを探す
     json_match = re.search(r'\*\*スコア:\*\*```json\s*({.*?})\s*```', feedback, re.DOTALL)
     if json_match:
         try:
@@ -420,15 +471,36 @@ def extract_scores(feedback):
         except (json.JSONDecodeError, ValueError) as e:
             st.warning(f"スコアのJSONパースまたは値変換中にエラーが発生しました。旧形式で抽出を試みます: {e}")
 
-    # Fallback to regex if JSON parsing fails or JSON block is not found
+    # 3. 一般的なJSONブロックを探す（フォールバック）
+    json_match = re.search(r'```json\s*({.*?})\s*```', feedback, re.DOTALL)
+    if json_match:
+        try:
+            scores = json.loads(json_match.group(1))
+            # Ensure all values are integers
+            for key, value in scores.items():
+                scores[key] = int(value)
+            return scores
+        except (json.JSONDecodeError, ValueError) as e:
+            st.warning(f"スコアのJSONパースまたは値変換中にエラーが発生しました。旧形式で抽出を試みます: {e}")
+
+    # 4. Fallback to regex if JSON parsing fails or JSON block is not found
     score_pattern = re.compile(r"\*\*([a-zA-Z0-9\u4e00-\u9fa5]+)[:：]:\*\*\s*(\d+)")
     matches = score_pattern.findall(feedback)
     for key, score in matches:
         scores[key] = int(score)
+    
     return scores
 
-def format_history_for_download(data):
-    """Formats a history record into a string for downloading."""
+def format_history_for_download(data: Dict[str, Any]) -> str:
+    """
+    履歴レコードをダウンロード用の文字列にフォーマットします。
+    
+    Args:
+        data (Dict[str, Any]): 履歴データ
+    
+    Returns:
+        str: フォーマットされた文字列
+    """
     practice_type = data['type']
     s = f"# {practice_type} 練習結果\n\n"
     s += f"実施日時: {datetime.fromisoformat(data['date']).strftime('%Y/%m/%d %H:%M')}\n\n"
@@ -499,8 +571,14 @@ def format_history_for_download(data):
     s += f"## AIによる採点結果\n\n{data['feedback']}"
     return s
 
-def handle_submission(feedback_stream, history_data_base):
-    """Handles the streaming feedback, saving, and download button logic."""
+def handle_submission(feedback_stream: Any, history_data_base: Dict[str, Any]) -> None:
+    """
+    ストリーミングフィードバック、保存、ダウンロードボタンのロジックを処理します。
+    
+    Args:
+        feedback_stream (Any): フィードバックストリーム
+        history_data_base (Dict[str, Any]): 履歴データのベース
+    """
     st.subheader("採点結果")
     feedback_placeholder = st.empty()
     full_feedback = ""
@@ -535,26 +613,29 @@ def handle_submission(feedback_stream, history_data_base):
             st.info("部分的なフィードバック:")
             st.markdown(full_feedback)
 
-def reset_session_state(keys_to_reset):
+def reset_session_state(keys_to_reset: List[str]) -> None:
     """
     指定されたキーのリストに基づいてセッション変数をリセットする。
+    
+    Args:
+        keys_to_reset (List[str]): リセットするキーのリスト
     """
     for key in keys_to_reset:
         if key in st.session_state:
             del st.session_state[key]
 
-def answer_followup_question_stream(original_content, original_results, question, question_type="一般"):
+def answer_followup_question_stream(original_content: Dict[str, Any], original_results: str, question: str, question_type: str = "一般") -> Any:
     """
     元の結果に基づいて追加質問に回答するストリーミング関数
     
     Args:
-        original_content (dict): 元の提出内容（課題、回答など）
+        original_content (Dict[str, Any]): 元の提出内容（課題、回答など）
         original_results (str): 元のAI評価結果
         question (str): ユーザーからの追加質問
         question_type (str): 質問の種類（"小論文"、"面接"、"一般"）
     
     Yields:
-        応答のストリーミングチャンク
+        Any: 応答のストリーミングチャンク
     """
     try:
         client = genai.Client()
@@ -641,12 +722,12 @@ def answer_followup_question_stream(original_content, original_results, question
         error_msg = f"申し訳ございません。回答生成中にエラーが発生しました: {str(e)}"
         yield type('ErrorChunk', (), {'text': error_msg})()
 
-def render_followup_chat(original_content, original_results, question_type="一般", session_key="followup_chat"):
+def render_followup_chat(original_content: Dict[str, Any], original_results: str, question_type: str = "一般", session_key: str = "followup_chat") -> None:
     """
     追加質問用のチャットUIを描画する
     
     Args:
-        original_content (dict): 元の提出内容
+        original_content (Dict[str, Any]): 元の提出内容
         original_results (str): 元のAI評価結果
         question_type (str): 質問の種類
         session_key (str): セッション状態のキー
@@ -711,7 +792,7 @@ def render_followup_chat(original_content, original_results, question_type="一�
         # 表示を更新
         st.rerun()
 
-def clear_followup_chat(session_key="followup_chat"):
+def clear_followup_chat(session_key: str = "followup_chat") -> None:
     """
     追加質問のチャット履歴をクリアする
     
@@ -722,7 +803,7 @@ def clear_followup_chat(session_key="followup_chat"):
     if chat_key in st.session_state:
         st.session_state[chat_key] = []
 
-def get_recent_themes(practice_type: str, limit: int = 5) -> list:
+def get_recent_themes(practice_type: str, limit: int = 5) -> List[str]:
     """
     指定された練習タイプの最近のテーマを取得します。
     
@@ -735,7 +816,7 @@ def get_recent_themes(practice_type: str, limit: int = 5) -> list:
     """
     try:
         # 新しいデータベースアダプターシステムを使用
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         from modules.session_manager import StreamlitSessionManager
         
         # セッション管理の初期化
@@ -743,14 +824,14 @@ def get_recent_themes(practice_type: str, limit: int = 5) -> list:
         session_manager.initialize_session()
         
         # データベースアダプターで取得
-        db_adapter = DatabaseAdapter()
+        db_adapter = DatabaseAdapterV3()
         return db_adapter.get_recent_themes(practice_type, limit)
         
     except ImportError:
         # フォールバック: 従来の方法
         return _get_recent_themes_local(practice_type, limit)
 
-def _get_recent_themes_local(practice_type: str, limit: int = 5) -> list:
+def _get_recent_themes_local(practice_type: str, limit: int = 5) -> List[str]:
     """フォールバック: ローカルファイルから最近のテーマを取得"""
     try:
         history = _load_history_local()
@@ -769,7 +850,7 @@ def _get_recent_themes_local(practice_type: str, limit: int = 5) -> list:
         st.warning(f"最近のテーマ取得中にエラーが発生しました: {e}")
         return []
 
-def get_theme_history(practice_type: str, theme: str) -> list:
+def get_theme_history(practice_type: str, theme: str) -> List[Dict[str, Any]]:
     """
     指定されたテーマの過去の成績履歴を取得します。
     
@@ -782,7 +863,7 @@ def get_theme_history(practice_type: str, theme: str) -> list:
     """
     try:
         # 新しいデータベースアダプターシステムを使用
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         from modules.session_manager import StreamlitSessionManager
         
         # セッション管理の初期化
@@ -790,14 +871,14 @@ def get_theme_history(practice_type: str, theme: str) -> list:
         session_manager.initialize_session()
         
         # データベースアダプターで取得
-        db_adapter = DatabaseAdapter()
+        db_adapter = DatabaseAdapterV3()
         return db_adapter.get_theme_history(practice_type, theme)
         
     except ImportError:
         # フォールバック: 従来の方法
         return _get_theme_history_local(practice_type, theme)
 
-def _get_theme_history_local(practice_type: str, theme: str) -> list:
+def _get_theme_history_local(practice_type: str, theme: str) -> List[Dict[str, Any]]:
     """フォールバック: ローカルファイルからテーマ履歴を取得"""
     try:
         history = _load_history_local()
@@ -839,7 +920,7 @@ def is_theme_recently_used(practice_type: str, theme: str, recent_limit: int = 3
     """
     try:
         # 新しいデータベースアダプターシステムを使用
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         from modules.session_manager import StreamlitSessionManager
         
         # セッション管理の初期化
@@ -847,7 +928,7 @@ def is_theme_recently_used(practice_type: str, theme: str, recent_limit: int = 3
         session_manager.initialize_session()
         
         # データベースアダプターで確認
-        db_adapter = DatabaseAdapter()
+        db_adapter = DatabaseAdapterV3()
         return db_adapter.is_theme_recently_used(practice_type, theme, recent_limit)
         
     except ImportError:
@@ -855,7 +936,7 @@ def is_theme_recently_used(practice_type: str, theme: str, recent_limit: int = 3
         recent_themes = _get_recent_themes_local(practice_type, recent_limit)
         return theme in recent_themes
 
-def calculate_progress_stats(theme_history: list) -> dict:
+def calculate_progress_stats(theme_history: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     テーマの履歴から進歩統計を計算します。
     
@@ -903,13 +984,13 @@ def calculate_progress_stats(theme_history: list) -> dict:
         st.warning(f"進歩統計計算中にエラーが発生しました: {e}")
         return {"has_progress": False}
 
-def render_progress_comparison(theme: str, theme_history: list):
+def render_progress_comparison(theme: str, theme_history: List[Dict[str, Any]]) -> None:
     """
     テーマの進歩比較を表示します。
     
     Args:
         theme (str): テーマ名
-        theme_history (list): テーマの履歴データ
+        theme_history (List[Dict[str, Any]]): テーマの履歴データ
     """
     if not theme_history:
         return
@@ -996,7 +1077,7 @@ def render_progress_comparison(theme: str, theme_history: list):
             if i < len(theme_history) - 1:  # 最後の要素でなければ区切り線
                 st.markdown("---")
 
-def save_recent_theme(theme: str):
+def save_recent_theme(theme: str) -> None:
     """
     最近使用したテーマをセッション状態に保存します。
     
@@ -1016,18 +1097,18 @@ def save_recent_theme(theme: str):
     if len(st.session_state.recent_knowledge_themes) > 5:
         st.session_state.recent_knowledge_themes = st.session_state.recent_knowledge_themes[:5]
 
-def api_call_with_retry(func, max_retries=3, base_delay=2, max_delay=60):
+def api_call_with_retry(func: callable, max_retries: int = 3, base_delay: int = 2, max_delay: int = 60) -> Any:
     """
     指数バックオフでAPIコールをリトライする関数
     
     Args:
-        func: 実行するAPI関数
-        max_retries: 最大リトライ回数
-        base_delay: 基本待機時間（秒）
-        max_delay: 最大待機時間（秒）
+        func (callable): 実行するAPI関数
+        max_retries (int): 最大リトライ回数
+        base_delay (int): 基本待機時間（秒）
+        max_delay (int): 最大待機時間（秒）
     
     Returns:
-        APIコールの結果またはエラー
+        Any: APIコールの結果またはエラー
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -1066,16 +1147,17 @@ def api_call_with_retry(func, max_retries=3, base_delay=2, max_delay=60):
     # ここには到達しないはずだが、念のため
     raise Exception("API call failed after all retries")
 
-def score_with_retry_stream(score_func, *args, **kwargs):
+def score_with_retry_stream(score_func: callable, *args: Any, **kwargs: Any) -> Any:
     """
     採点関数をリトライ機能付きでストリーミング実行する
     
     Args:
-        score_func: 採点関数
-        *args, **kwargs: 採点関数への引数
+        score_func (callable): 採点関数
+        *args (Any): 採点関数への引数
+        **kwargs (Any): 採点関数へのキーワード引数
     
     Yields:
-        採点結果のストリーミングチャンク
+        Any: 採点結果のストリーミングチャンク
     """
     max_retries = 3
     

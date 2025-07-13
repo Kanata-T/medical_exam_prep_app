@@ -6,7 +6,7 @@ from modules.essay_scorer import (generate_long_essay_theme, score_long_essay_st
 from modules.utils import (check_api_configuration, show_api_setup_guide,
                           extract_scores, save_history, format_history_for_download,
                           auto_save_session)
-from modules.database_adapter import DatabaseAdapter
+from modules.database_adapter_v3 import DatabaseAdapterV3
 from modules.session_manager import StreamlitSessionManager
 import os
 

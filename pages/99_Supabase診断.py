@@ -50,15 +50,15 @@ try:
             # 4. データベーステスト
             st.subheader("4. データベースアクセステスト")
             try:
-                # practice_typesテーブルのテスト
-                result = client.table('practice_types').select('practice_type_id, display_name').limit(5).execute()
-                st.success(f"✅ practice_types テーブル: 正常にアクセスできます ({len(result.data)}件取得)")
+                # exercise_typesテーブルのテスト（新スキーマ）
+                result = client.table('exercise_types').select('exercise_type_id, display_name').limit(5).execute()
+                st.success(f"✅ exercise_types テーブル: 正常にアクセスできます ({len(result.data)}件取得)")
                 
                 # 取得したデータを表示
                 if result.data:
-                    st.write("**取得されたpractice_types:**")
+                    st.write("**取得されたexercise_types:**")
                     for item in result.data:
-                        st.write(f"- ID: {item['practice_type_id']}, 名前: {item['display_name']}")
+                        st.write(f"- ID: {item['exercise_type_id']}, 名前: {item['display_name']}")
                 
             except Exception as e:
                 st.error(f"❌ データベースアクセスエラー: {e}")
@@ -72,44 +72,12 @@ try:
 except ImportError as e:
     st.error(f"❌ supabase-py インポートエラー: {e}")
 
-# 5. DatabaseManagerV2診断
-st.subheader("5. DatabaseManagerV2診断")
-try:
-    from modules.database_v2 import db_manager_v2
-    
-    is_available = db_manager_v2.is_available()
-    if is_available:
-        st.success("✅ DatabaseManagerV2: 正常に動作しています")
-        
-        # ユーザーIDテスト
-        try:
-            user_id = db_manager_v2.get_current_user_id()
-            st.write(f"**現在のユーザーID**: {user_id}")
-            
-            # 練習タイプ取得テスト
-            practice_types = db_manager_v2.get_practice_types()
-            st.write(f"**練習タイプ数**: {len(practice_types)}種類")
-            
-            # 履歴取得テスト
-            history = db_manager_v2.get_user_history(limit=1)
-            st.write(f"**履歴件数**: {len(history)}件")
-            
-        except Exception as e:
-            st.error(f"❌ DatabaseManagerV2操作エラー: {e}")
-            
-    else:
-        st.error("❌ DatabaseManagerV2: 利用不可状態です")
-        st.write("これが「ローカルファイル使用」と表示される原因です。")
-        
-except Exception as e:
-    st.error(f"❌ DatabaseManagerV2インポートエラー: {e}")
-
 # 6. DatabaseAdapter診断
 st.subheader("6. DatabaseAdapter診断")
 try:
-    from modules.database_adapter import DatabaseAdapter
+    from modules.database_adapter_v3 import DatabaseAdapterV3
     
-    db_adapter = DatabaseAdapter()
+    db_adapter = DatabaseAdapterV3()
     is_available = db_adapter.is_available()
     
     if is_available:

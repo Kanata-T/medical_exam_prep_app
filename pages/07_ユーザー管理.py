@@ -7,7 +7,12 @@ from modules.user_auth import (
     UserAchievement, AccountStatus
 )
 from modules.utils import auto_save_session
+from modules.session_manager import StreamlitSessionManager, SessionPersistence
 import os
+from modules.database_adapter_v3 import DatabaseAdapterV3
+import logging
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="ユーザー管理",
@@ -89,6 +94,8 @@ if 'user_authenticated' not in st.session_state:
     st.session_state.user_authenticated = False
 if 'user_profile' not in st.session_state:
     st.session_state.user_profile = None
+if 'auth_token' not in st.session_state:
+    st.session_state.auth_token = None
 
 # 自動保存
 auto_save_session()
@@ -98,6 +105,157 @@ auth_manager = get_user_auth_manager()
 if not auth_manager:
     st.error("ユーザー管理機能が利用できません。データベース接続を確認してください。")
     st.stop()
+
+# セッション管理の初期化
+session_manager = StreamlitSessionManager()
+
+def restore_auth_state():
+    """認証状態を復元"""
+    try:
+        # 1. URLパラメータからセッショントークンを確認
+        session_token = st.query_params.get('session_token', None)
+        if session_token:
+            session_data = SessionPersistence.load_session_from_token(session_token)
+            if session_data and session_data.get('is_authenticated', False):
+                user_profile = session_data.get('user_profile')
+                if user_profile:
+                    st.session_state.user_authenticated = True
+                    st.session_state.user_profile = user_profile
+                    st.session_state.auth_token = session_token
+                    logger.info(f"認証状態をURLパラメータから復元: {user_profile.get('display_name', 'Unknown')}")
+                    return True
+        
+        # 2. セッション状態から認証トークンを確認
+        if 'current_auth_token' in st.session_state:
+            auth_token = st.session_state.current_auth_token
+            auth_data = SessionPersistence.load_auth_from_token(auth_token)
+            if auth_data and auth_data.get('is_authenticated', False):
+                st.session_state.user_authenticated = True
+                st.session_state.user_profile = auth_data.get('user_profile')
+                st.session_state.auth_token = auth_token
+                logger.info(f"認証状態をセッションから復元: {auth_data.get('user_profile', {}).get('display_name', 'Unknown')}")
+                return True
+        
+        # 3. 既存のセッション状態を確認
+        if 'user_authenticated' in st.session_state and st.session_state.user_authenticated:
+            if 'user_profile' in st.session_state and st.session_state.user_profile:
+                user_profile = st.session_state.user_profile
+                if hasattr(user_profile, 'display_name'):
+                    logger.info(f"既存の認証状態を確認: {user_profile.display_name}")
+                else:
+                    logger.info("既存の認証状態を確認: Unknown")
+                return True
+        
+        logger.info("認証状態の復元に失敗")
+        return False
+    except Exception as e:
+        logger.error(f"認証状態の復元中にエラーが発生しました: {e}")
+        return False
+
+def save_auth_state(user_profile: UserProfile):
+    """認証状態を保存"""
+    try:
+        # UserProfileオブジェクトをJSON化可能な辞書に変換
+        profile_dict = {
+            'user_id': user_profile.user_id,
+            'email': user_profile.email,
+            'display_name': user_profile.display_name,
+            'first_name': user_profile.first_name,
+            'last_name': user_profile.last_name,
+            'avatar_url': user_profile.avatar_url,
+            'bio': user_profile.bio,
+            'timezone': user_profile.timezone,
+            'language': user_profile.language,
+            'email_verified': user_profile.email_verified,
+            'account_status': user_profile.account_status,
+            'created_at': user_profile.created_at.isoformat() if user_profile.created_at else None,
+            'last_active': user_profile.last_active.isoformat() if user_profile.last_active else None,
+            'last_login': user_profile.last_login.isoformat() if user_profile.last_login else None
+        }
+        
+        # セッショントークンを生成・保存
+        session_data = {
+            'user_profile': profile_dict,
+            'is_authenticated': True,
+            'login_time': datetime.now().isoformat()
+        }
+        
+        session_token = SessionPersistence.save_session_token(
+            user_profile.user_id, session_data
+        )
+        
+        # 認証トークンも生成・保存
+        auth_token = SessionPersistence.save_auth_token(
+            user_profile.user_id, profile_dict
+        )
+        
+        # セッション状態を設定
+        st.session_state.auth_token = session_token
+        st.session_state.user_authenticated = True
+        st.session_state.user_profile = user_profile
+        st.session_state.current_auth_token = auth_token
+        
+        # URLパラメータにセッショントークンを設定
+        try:
+            st.query_params['session_token'] = session_token
+        except:
+            pass  # URL更新が失敗しても継続
+        
+        logger.info(f"認証状態を保存: {user_profile.display_name}")
+        return True
+    except Exception as e:
+        logger.error(f"認証状態の保存中にエラーが発生しました: {e}")
+        return False
+
+def clear_auth_state():
+    """認証状態をクリア"""
+    try:
+        # セッション状態をクリア
+        session_keys_to_clear = [
+            'user_profile', 'user_authenticated', 'auth_token', 'current_auth_token'
+        ]
+        
+        for key in session_keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        # セッショントークン辞書もクリア
+        if 'session_tokens' in st.session_state:
+            del st.session_state.session_tokens
+        
+        if 'auth_tokens' in st.session_state:
+            del st.session_state.auth_tokens
+        
+        # URLパラメータからセッショントークンを削除
+        try:
+            if 'session_token' in st.query_params:
+                del st.query_params['session_token']
+        except:
+            pass  # URL更新が失敗しても継続
+        
+        logger.info("認証状態をクリアしました")
+        return True
+    except Exception as e:
+        logger.error(f"認証状態のクリア中にエラーが発生しました: {e}")
+        return False
+
+# ページ読み込み時に認証状態を復元
+if 'user_authenticated' not in st.session_state:
+    st.session_state.user_authenticated = False
+
+# 認証状態の復元を確実に実行
+if not st.session_state.user_authenticated:
+    restore_auth_state()
+
+# デバッグ用：認証状態を表示
+if st.session_state.get('user_authenticated'):
+    user_profile = st.session_state.get('user_profile')
+    if user_profile and hasattr(user_profile, 'display_name'):
+        st.sidebar.success(f"✅ ログイン中: {user_profile.display_name}")
+    else:
+        st.sidebar.success("✅ ログイン中: Unknown")
+else:
+    st.sidebar.info("🔐 未ログイン")
 
 # タイトル
 st.markdown('<h1 class="main-header">👤 ユーザー管理</h1>', unsafe_allow_html=True)
@@ -134,12 +292,14 @@ def show_login_form():
                 login_result, user_profile, message = auth_manager.login_user(email, password)
                 
                 if login_result == LoginResult.SUCCESS and user_profile:
-                    st.session_state.user_authenticated = True
-                    st.session_state.user_profile = user_profile
-                    st.session_state.auth_mode = 'profile'
-                    st.success(message)
-                    time.sleep(1)
-                    st.rerun()
+                    # 認証状態を保存
+                    if save_auth_state(user_profile):
+                        st.session_state.auth_mode = 'profile'
+                        st.success(message)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("ログイン状態の保存に失敗しました。")
                 else:
                     st.error(message)
     
@@ -266,34 +426,115 @@ def show_user_profile():
 
 def show_learning_statistics(user_id: str):
     """学習統計表示"""
-    st.markdown("### 📊 学習統計")
+    st.markdown("### 学習統計")
     
-    # 統計データを取得（実装は簡略化）
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.metric("総練習回数", "42", delta="3")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.metric("平均スコア", "8.2", delta="0.5")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.metric("連続日数", "7", delta="7")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.metric("今月の練習", "15", delta="8")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # 学習履歴グラフ（簡略化）
-    st.markdown("#### 📈 学習進捗")
-    st.info("詳細な学習統計とグラフは開発中です。現在は「学習履歴」ページで確認できます。")
+    # データベースから実際の統計を取得
+    try:
+        adapter = DatabaseAdapterV3()
+        if adapter.is_available():
+            # 実際の統計データを取得
+            total_sessions = 0
+            average_score = 0.0
+            streak_days = 0
+            monthly_sessions = 0
+            
+            # 学習履歴から統計を計算
+            history = adapter.get_user_history(limit=1000)  # 全履歴を取得
+            
+            if history:
+                total_sessions = len(history)
+                
+                # 平均スコアを計算
+                scores = []
+                for session in history:
+                    if 'scores' in session and session['scores']:
+                        for score in session['scores']:
+                            if 'score_value' in score:
+                                scores.append(score['score_value'])
+                
+                if scores:
+                    average_score = sum(scores) / len(scores)
+                
+                # 今月のセッション数を計算
+                current_month = datetime.now().month
+                monthly_sessions = 0
+                for s in history:
+                    try:
+                        # 新しいDB設計に対応した日付フィールドの取得
+                        date_str = s.get('date') or s.get('created_at') or s.get('start_time')
+                        if date_str:
+                            if isinstance(date_str, str):
+                                # 文字列の場合はパース
+                                if 'Z' in date_str:
+                                    date_str = date_str.replace('Z', '+00:00')
+                                session_date = datetime.fromisoformat(date_str)
+                            else:
+                                # datetimeオブジェクトの場合
+                                session_date = date_str
+                            
+                            if session_date.month == current_month:
+                                monthly_sessions += 1
+                    except (ValueError, TypeError, AttributeError) as e:
+                        # 日付パースエラーの場合はスキップ
+                        continue
+                
+                # 連続日数は簡略化（実際の実装ではより複雑）
+                streak_days = min(7, total_sessions)  # 仮の実装
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+                st.metric("総練習回数", str(total_sessions))
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+                st.metric("平均スコア", f"{average_score:.1f}" if average_score > 0 else "0.0")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+                st.metric("連続日数", str(streak_days))
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col4:
+                st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+                st.metric("今月の練習", str(monthly_sessions))
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            # 学習履歴グラフ（簡略化）
+            st.markdown("#### 📈 学習進捗")
+            if total_sessions > 0:
+                st.success(f"現在 {total_sessions} 回の練習を完了しています。詳細は「学習履歴」ページで確認できます。")
+            else:
+                st.info("まだ練習履歴がありません。練習を始めて統計を確認しましょう！")
+        else:
+            st.warning("データベース接続が利用できません。統計情報を表示できません。")
+    except Exception as e:
+        st.error(f"統計データの取得中にエラーが発生しました: {e}")
+        # フォールバック: 基本的な統計表示
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+            st.metric("総練習回数", "0")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+            st.metric("平均スコア", "0.0")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+            st.metric("連続日数", "0")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col4:
+            st.markdown('<div class="stats-card">', unsafe_allow_html=True)
+            st.metric("今月の練習", "0")
+            st.markdown('</div>', unsafe_allow_html=True)
 
 def show_user_achievements(user_id: str):
     """ユーザー成果表示"""
@@ -528,12 +769,14 @@ def show_logout_button():
             st.markdown("---")
             if st.button("🚪 ログアウト", use_container_width=True, type="secondary"):
                 if auth_manager.logout_user(st.session_state.user_profile.user_id):
-                    st.session_state.user_authenticated = False
-                    st.session_state.user_profile = None
-                    st.session_state.auth_mode = 'login'
-                    st.success("ログアウトしました。")
-                    time.sleep(1)
-                    st.rerun()
+                    # 認証状態をクリア
+                    if clear_auth_state():
+                        st.session_state.auth_mode = 'login'
+                        st.success("ログアウトしました。")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("ログアウト中にエラーが発生しました")
 
 # メイン処理
 def main():

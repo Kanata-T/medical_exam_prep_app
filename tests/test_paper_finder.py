@@ -161,33 +161,18 @@ def test_database_integration():
     print("=" * 60)
     
     try:
-        from modules.database_adapter import DatabaseAdapter
+        from modules.database_adapter_v3 import DatabaseAdapterV3
         from modules.paper_finder import get_keyword_history, clear_keyword_history
         
         print("✅ 統合テスト用モジュールインポート成功")
         
         # 1. DatabaseAdapterによる直接操作テスト
         print("\n1. DatabaseAdapter直接操作テスト")
-        db = DatabaseAdapter()
+        db = DatabaseAdapterV3()
         
-        # キーワード生成関連の履歴タイプを全て確認
-        keyword_types = [
-            "keyword_generation_paper",
-            "keyword_generation_freeform", 
-            "keyword_generation_general"
-        ]
-        
-        total_records = 0
-        for practice_type in keyword_types:
-            try:
-                records = db.get_practice_history_by_type(practice_type, limit=10)
-                count = len(records)
-                total_records += count
-                print(f"✅ {practice_type}: {count}件")
-            except Exception as e:
-                print(f"❌ {practice_type}: エラー ({e})")
-        
-        print(f"📊 DatabaseAdapter総取得件数: {total_records}件")
+        # 新スキーマの履歴取得テスト
+        records = db.get_user_history()
+        assert isinstance(records, list)
         
         # 2. paper_finder関数による間接操作テスト
         print("\n2. paper_finder関数経由テスト")
@@ -197,11 +182,13 @@ def test_database_integration():
             print(f"📊 paper_finder取得件数: {pf_count}件")
             
             # 件数比較（統合テスト）
-            if total_records == pf_count:
+            # 新スキーマの履歴取得テスト
+            new_records = db.get_user_history()
+            if len(new_records) == pf_count:
                 print("✅ DatabaseAdapterとpaper_finder関数の結果が一致")
-            elif total_records > pf_count:
+            elif len(new_records) > pf_count:
                 print("⚠️ DatabaseAdapterの方が多い（フィルタリングされている可能性）")
-            elif total_records < pf_count:
+            elif len(new_records) < pf_count:
                 print("⚠️ paper_finder関数の方が多い（従来データ含む可能性）")
                 
         except Exception as e:
@@ -216,12 +203,9 @@ def test_database_integration():
             
             # DatabaseAdapter経由での確認
             remaining_total = 0
-            for practice_type in keyword_types:
-                try:
-                    remaining = db.get_practice_history_by_type(practice_type, limit=10)
-                    remaining_total += len(remaining)
-                except:
-                    pass
+            # 新スキーマの履歴取得テスト
+            remaining = db.get_user_history()
+            remaining_total = len(remaining)
             
             print(f"📊 削除後DatabaseAdapter確認: {remaining_total}件")
             

@@ -5,7 +5,11 @@ from google.api_core import retry
 import os
 import logging
 import json
+import re
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
 from modules.utils import score_with_retry_stream
+from modules.database_adapter_v3 import DatabaseAdapterV3
 
 # ロガー設定
 logging.basicConfig(level=logging.INFO)
@@ -32,9 +36,16 @@ def _create_error_stream(e: Exception):
     logger.error(f"An error occurred: {error_message}")
     yield error_message
 
-def validate_interview_inputs(question, answer):
+def validate_interview_inputs(question: str, answer: str) -> Tuple[bool, str]:
     """
     面接入力値を検証します。
+    
+    Args:
+        question (str): 面接質問
+        answer (str): 回答
+    
+    Returns:
+        Tuple[bool, str]: (有効?, エラーメッセージ)
     """
     if not question or len(question.strip()) < 5:
         return False, "面接質問が設定されていません。"
@@ -44,9 +55,12 @@ def validate_interview_inputs(question, answer):
         return False, "回答が長すぎます（2000文字以内）。"
     return True, ""
 
-def get_interview_question_categories():
+def get_interview_question_categories() -> Dict[str, List[str]]:
     """
     面接質問のカテゴリとサンプルを返します。
+    
+    Returns:
+        Dict[str, List[str]]: カテゴリ別の質問サンプル
     """
     return {
         "自己PR・志望動機": ["なぜ当院を志望されたのですか？", "あなたの強みを教えてください。", "将来どのような医師になりたいですか？"],
@@ -83,8 +97,16 @@ def get_interview_scoring_prompt(question: str, answer: str) -> str:
 """
 
 @retry.Retry()
-def generate_interview_question(category: str = "all") -> dict:
-    """AIを用いて面接の質問を1つ生成する"""
+def generate_interview_question(category: str = "all") -> Dict[str, str]:
+    """
+    AIを用いて面接の質問を1つ生成する
+    
+    Args:
+        category (str): 質問カテゴリ
+    
+    Returns:
+        Dict[str, str]: 生成された質問またはエラー情報
+    """
     prompt = f"""
 あなたは日本の医療機関における採用面接官です。
 医学生や研修医志望者に対して行う、効果的な面接質問を1つだけ生成してください。
@@ -101,11 +123,29 @@ def generate_interview_question(category: str = "all") -> dict:
         logger.error(f"Error generating interview question: {e}")
         return {"error": str(e)}
 
-def score_interview_answer_stream(question: str, answer: str):
+def score_interview_answer_stream(question: str, answer: str, save_to_db: bool = True) -> Any:
     """
     単発の面接回答を評価し、結果をストリーミングで返す
     リトライ機能付きで503エラーなどに対応。
+    
+    Args:
+        question (str): 面接質問
+        answer (str): 回答
+        save_to_db (bool): データベースに保存するかどうか
+    
+    Yields:
+        採点結果のストリーミングチャンク
     """
+    # 入力検証
+    is_valid, error_msg = validate_interview_inputs(question, answer)
+    if not is_valid:
+        yield type('ErrorChunk', (), {'text': f"❌ 入力エラー: {error_msg}"})()
+        return
+    
+    # 採点開始時間記録
+    start_time = datetime.now()
+    full_response = ""
+    
     # リトライ機能付きの採点関数を定義
     def _score_interview_internal():
         prompt = get_interview_scoring_prompt(question, answer)
@@ -116,14 +156,130 @@ def score_interview_answer_stream(question: str, answer: str):
         except Exception as e:
             raise e
     
-    # リトライ機能付きでストリーミング実行
+    # ストリーミング実行とレスポンス収集
     try:
-        yield from score_with_retry_stream(_score_interview_internal)
+        for chunk in score_with_retry_stream(_score_interview_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
     except Exception as e:
-        # 最終的にエラーが発生した場合
-        yield from _create_error_stream(e)
+        yield type('ErrorChunk', (), {'text': f"❌ 面接採点エラー: {str(e)}"})()
+        return
+    
+    # 採点完了後の処理
+    if save_to_db and full_response:
+        try:
+            # スコア解析
+            parsed_result = parse_interview_score_from_response(full_response)
+            
+            # 入力データ準備
+            inputs = {
+                'question': question,
+                'answer': answer
+            }
+            
+            # データベースに保存
+            save_interview_scoring_result(
+                inputs=inputs,
+                scores=parsed_result['scores'],
+                feedback=parsed_result['feedback']
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 面接採点結果保存エラー: {e}")
+    
+    # 採点時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 面接採点時間: {duration:.2f}秒")
 
-def get_interview_tips() -> dict:
+def parse_interview_score_from_response(response_text: str) -> Dict[str, Any]:
+    """
+    AI応答から面接スコアを解析します。
+    
+    Args:
+        response_text (str): AIの応答テキスト
+        
+    Returns:
+        Dict[str, Any]: 解析されたスコアとフィードバック
+    """
+    try:
+        # 評価スコアの抽出
+        scores = {}
+        score_patterns = {
+            "論理性": r"論理性[：:]\s*(\d+)",
+            "具体性": r"具体性[：:]\s*(\d+)",
+            "自己理解": r"自己理解[：:]\s*(\d+)",
+            "コミュニケーション能力": r"コミュニケーション能力[：:]\s*(\d+)",
+            "熱意": r"熱意[：:]\s*(\d+)"
+        }
+        
+        for category, pattern in score_patterns.items():
+            match = re.search(pattern, response_text)
+            if match:
+                scores[category] = int(match.group(1))
+        
+        # 総合評価の抽出
+        total_score = sum(scores.values()) if scores else 0
+        
+        return {
+            'scores': scores,
+            'total_score': total_score,
+            'feedback': response_text,
+            'raw_response': response_text
+        }
+        
+    except Exception as e:
+        return {
+            'scores': {},
+            'total_score': 0,
+            'feedback': response_text,
+            'raw_response': response_text,
+            'parse_error': str(e)
+        }
+
+def save_interview_scoring_result(inputs: Dict[str, Any], scores: Dict[str, Any], 
+                                feedback: str, ai_model: str = 'gemini-2.5-flash') -> bool:
+    """
+    面接採点結果をデータベースに保存します。
+    
+    Args:
+        inputs (Dict[str, Any]): 入力データ
+        scores (Dict[str, Any]): スコアデータ
+        feedback (str): フィードバック
+        ai_model (str): 使用したAIモデル
+        
+    Returns:
+        bool: 保存成功時True
+    """
+    try:
+        db_adapter = DatabaseAdapterV3()
+        
+        # 入力データの準備
+        input_data = {
+            'type': '面接採点',
+            'date': str(datetime.now()),
+            'inputs': inputs,
+            'scores': scores,
+            'feedback': feedback,
+            'duration_seconds': 0  # 採点時間は別途計測が必要
+        }
+        
+        # データベースに保存
+        success = db_adapter.save_practice_history(input_data)
+        
+        if success:
+            print(f"✅ 面接採点結果を保存しました")
+        else:
+            print(f"❌ 面接採点結果の保存に失敗しました")
+        
+        return success
+        
+    except Exception as e:
+        print(f"❌ 面接採点結果保存エラー: {e}")
+        return False
+
+def get_interview_tips() -> Dict[str, List[str]]:
     """面接対策のヒントを返す"""
     return {
         "基本的な心構え": ["結論から話すことを意識する（PREP法）", "身だしなみを整え、清潔感を出す", "明るい表情とハキハキした声で話す", "正しい敬語を使う", "逆質問は、企業への理解度と熱意を示すチャンスです。事前にいくつか準備しておきましょう。"],
@@ -168,11 +324,22 @@ def get_interview_session_prompt(chat_history: list) -> str:
     
     return prompt
 
-def conduct_interview_session_stream(chat_history: list):
+def conduct_interview_session_stream(chat_history: List[Dict[str, str]], save_to_db: bool = True) -> Any:
     """
     面接セッションを継続し、結果をストリーミングで返す
     リトライ機能付きで503エラーなどに対応。
+    
+    Args:
+        chat_history (List[Dict[str, str]]): チャット履歴
+        save_to_db (bool): データベースに保存するかどうか
+    
+    Yields:
+        面接セッション結果のストリーミングチャンク
     """
+    # 面接開始時間記録
+    start_time = datetime.now()
+    full_response = ""
+    
     # リトライ機能付きの面接セッション関数を定義
     def _conduct_session_internal():
         prompt = get_interview_session_prompt(chat_history)
@@ -183,9 +350,36 @@ def conduct_interview_session_stream(chat_history: list):
         except Exception as e:
             raise e
     
-    # リトライ機能付きでストリーミング実行
+    # ストリーミング実行とレスポンス収集
     try:
-        yield from score_with_retry_stream(_conduct_session_internal)
+        for chunk in score_with_retry_stream(_conduct_session_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
     except Exception as e:
-        # 最終的にエラーが発生した場合
-        yield from _create_error_stream(e)
+        yield type('ErrorChunk', (), {'text': f"❌ 面接セッションエラー: {str(e)}"})()
+        return
+    
+    # 面接完了後の処理
+    if save_to_db and full_response:
+        try:
+            # 入力データ準備
+            inputs = {
+                'chat_history': chat_history,
+                'session_type': '面接セッション'
+            }
+            
+            # データベースに保存
+            save_interview_scoring_result(
+                inputs=inputs,
+                scores={'session_score': 0},  # セッション全体の評価は別途実装
+                feedback=full_response
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 面接セッション結果保存エラー: {e}")
+    
+    # 面接時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 面接セッション時間: {duration:.2f}秒")

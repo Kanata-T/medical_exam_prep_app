@@ -19,11 +19,11 @@ print(f"Python PATH: {sys.path[:3]}...")  # 最初の3つだけ表示
 # 1. DatabaseAdapterのテスト
 print("\n1. DatabaseAdapterのテスト")
 try:
-    from modules.database_adapter import DatabaseAdapter
-    print("✅ DatabaseAdapter インポート成功")
+    from modules.database_adapter_v3 import DatabaseAdapterV3
+    print("✅ DatabaseAdapterV3 インポート成功")
     
-    db = DatabaseAdapter()
-    print("✅ DatabaseAdapter インスタンス化成功")
+    db = DatabaseAdapterV3()
+    print("✅ DatabaseAdapterV3 インスタンス化成功")
     
     # 新機能の存在確認
     if hasattr(db, 'get_practice_history_by_type'):
@@ -37,15 +37,15 @@ try:
         print("❌ delete_practice_history_by_type メソッドなし")
         
 except Exception as e:
-    print(f"❌ DatabaseAdapter エラー: {e}")
+    print(f"❌ DatabaseAdapterV3 エラー: {e}")
 
 # 2. DatabaseManagerV2のテスト
 print("\n2. DatabaseManagerV2のテスト")
 try:
-    from modules.database_v2 import DatabaseManagerV2
+    from modules.database_v3 import DatabaseManagerV3
     print("✅ DatabaseManagerV2 インポート成功")
     
-    db_v2 = DatabaseManagerV2()
+    db_v2 = DatabaseManagerV3()
     print("✅ DatabaseManagerV2 インスタンス化成功")
     
     if hasattr(db_v2, 'delete_user_history_by_type'):
@@ -83,28 +83,28 @@ except Exception as e:
 # 5. 練習タイプマッピングのテスト
 print("\n5. 練習タイプマッピングのテスト")
 try:
-    from modules.database_adapter import DatabaseAdapter
-    db = DatabaseAdapter()
+    from modules.database_adapter_v3 import DatabaseAdapterV3
+    db = DatabaseAdapterV3()
     
     # 練習タイプマッピングの確認
     test_types = [
-        "keyword_generation_paper",
-        "keyword_generation_freeform", 
-        "keyword_generation_general",
-        "paper_search",
-        "medical_exam_comprehensive",
+        "keyword_generation_english",
+        "keyword_generation_free", 
+        "keyword_generation_adoption",
+        "paper_search_english",
+        "prefecture_adoption",
         "essay_practice",
-        "interview_practice_single",
-        "english_reading_standard"
+        "interview_prep",
+        "english_reading_practice"
     ]
     
-    if hasattr(db, '_get_practice_type_id_by_new_key'):
+    if hasattr(db, '_get_exercise_type_id_by_new_key'):
         print("✅ 練習タイプマッピング関数存在")
         
         # サンプルマッピングテスト
         for practice_type in test_types[:3]:  # 最初の3つだけテスト
             try:
-                result = db._get_practice_type_id_by_new_key(practice_type)
+                result = db._get_exercise_type_id_by_new_key(practice_type)
                 if result:
                     print(f"✅ {practice_type} -> ID: {result}")
                 else:

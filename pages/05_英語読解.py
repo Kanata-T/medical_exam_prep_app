@@ -9,7 +9,7 @@ from modules.utils import (handle_submission, reset_session_state,
                           check_api_configuration, show_api_setup_guide,
                           extract_scores, save_history, format_history_for_download,
                           restore_exam_session, auto_save_session)
-from modules.database_adapter import DatabaseAdapter
+from modules.database_adapter_v3 import DatabaseAdapterV3
 from modules.session_manager import StreamlitSessionManager
 import os
 
@@ -243,20 +243,85 @@ if st.session_state.reading_step == 'setup':
                 st.markdown("**最近生成されたキーワード（最新5件）:**")
                 st.caption("⚠️ 次回の自動生成時、これらのキーワードと類似したものは避けられます")
                 
-                recent_history = keyword_history[-5:]
-                for i, item in enumerate(reversed(recent_history), 1):
+                recent_history = keyword_history[:5]  # 最新5件（既にソート済み）
+                for i, item in enumerate(recent_history, 1):
                     category = item.get('category', '不明')
                     keywords = item.get('keywords', '不明')
                     rationale = item.get('rationale', '')
-                    st.markdown(f"{i}. **{category}**: `{keywords}`")
+                    date = item.get('date', '')
+                    purpose = item.get('purpose', '')
+                    ai_model = item.get('ai_model', '')
+                    
+                    # 日付のフォーマット
+                    formatted_date = ""
+                    if date:
+                        try:
+                            # ISO形式の日付をパースしてフォーマット
+                            from datetime import datetime
+                            date_obj = datetime.fromisoformat(date.replace('Z', '+00:00'))
+                            formatted_date = date_obj.strftime('%m/%d %H:%M')
+                        except:
+                            formatted_date = date[:10] if len(date) >= 10 else date
+                    
+                    # カテゴリー名の取得
+                    category_name = category
+                    if category and category.isdigit():
+                        # カテゴリーIDの場合は名前を取得
+                        try:
+                            from modules.database_v3 import db_manager_v3
+                            categories = db_manager_v3.get_all_categories()
+                            for cat in categories:
+                                if str(cat.get('category_id', '')) == category:
+                                    category_name = cat.get('display_name', category)
+                                    break
+                        except:
+                            category_name = f"カテゴリー{category}"
+                    
+                    # 表示内容
+                    st.markdown(f"{i}. **{category_name}**: `{keywords}`")
+                    if formatted_date:
+                        st.caption(f"   日時: {formatted_date}")
+                    if purpose and purpose != 'paper_search':
+                        st.caption(f"   目的: {purpose}")
+                    if ai_model:
+                        st.caption(f"   AI: {ai_model}")
                     if rationale and i <= 3:  # 最新3件のみ理由も表示
                         st.caption(f"   理由: {rationale}")
+                    st.markdown("---")
                 
                 # 過去のキーワードのリストを表示
                 past_keywords = [item.get('keywords', '') for item in recent_history if item.get('keywords')]
                 if past_keywords:
                     st.markdown("**回避対象キーワード:**")
                     st.code(', '.join([f'"{kw}"' for kw in past_keywords]), language=None)
+                
+                # 分野使用頻度の表示
+                try:
+                    from modules.paper_finder import get_keyword_history_with_details
+                    detailed_history = get_keyword_history_with_details(limit=20)
+                    if detailed_history:
+                        category_usage = {}
+                        for item in detailed_history:
+                            category_id = item.get('category_id', '')
+                            if category_id:
+                                category_usage[category_id] = category_usage.get(category_id, 0) + 1
+                        
+                        if category_usage:
+                            st.markdown("**分野使用頻度:**")
+                            for category_id, count in sorted(category_usage.items(), key=lambda x: x[1], reverse=True)[:5]:
+                                try:
+                                    from modules.database_v3 import db_manager_v3
+                                    categories = db_manager_v3.get_all_categories()
+                                    category_name = f"カテゴリー{category_id}"
+                                    for cat in categories:
+                                        if str(cat.get('category_id', '')) == str(category_id):
+                                            category_name = cat.get('display_name', f"カテゴリー{category_id}")
+                                            break
+                                    st.caption(f"  {category_name}: {count}回")
+                                except:
+                                    st.caption(f"  カテゴリー{category_id}: {count}回")
+                except Exception as e:
+                    st.caption(f"分野使用頻度の取得に失敗: {e}")
                 
                 st.markdown("---")
                 available_fields = get_available_fields()
@@ -754,7 +819,7 @@ elif st.session_state.reading_step == 'scoring':
         duration_seconds_remainder = int(duration_seconds % 60)
         
         if submitted.get('exam_style', False):
-            exam_type = "english_reading_standard"
+            exam_type = "english_reading_practice"  # 新DBに存在するタイプ名
             format_names = {
                 "letter_translation_opinion": "english_reading_letter_style",
                 "paper_comment_translation_opinion": "english_reading_comment_style"
@@ -763,7 +828,7 @@ elif st.session_state.reading_step == 'scoring':
             if format_type in format_names:
                 exam_type = format_names[format_type]
         else:
-            exam_type = "english_reading_standard"
+            exam_type = "english_reading_practice"  # 新DBに存在するタイプ名
         
         history_data = {
             "type": exam_type,

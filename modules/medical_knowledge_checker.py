@@ -4,7 +4,12 @@ from google.genai import types
 from google.api_core import retry
 import os
 import logging
+import json
+import re
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
 from modules.utils import safe_api_call, score_with_retry_stream
+from modules.database_adapter_v3 import DatabaseAdapterV3
 
 # ロガー設定
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +40,12 @@ def _create_error_stream(e: Exception):
 def generate_medical_question(theme: str) -> str:
     """
     指定されたテーマに基いて、医学部採用試験形式の自由記述問題を生成します。
+    
+    Args:
+        theme (str): 医学テーマ
+    
+    Returns:
+        str: 生成された問題文
     """
     import random
     
@@ -123,11 +134,32 @@ def generate_medical_question(theme: str) -> str:
         # フォールバック：基本的な問題形式を使用
         return selected_pattern['template'].format(theme=theme)
 
-def score_medical_answer_stream(question: str, answer: str):
+def score_medical_answer_stream(question: str, answer: str, save_to_db: bool = True) -> Any:
     """
     ユーザーの回答を医学部採用試験の基準で評価し、フィードバックと模範解答をストリーミングで返します。
     リトライ機能付きで503エラーなどに対応。
+    
+    Args:
+        question (str): 医学問題
+        answer (str): 回答
+        save_to_db (bool): データベースに保存するかどうか
+    
+    Yields:
+        採点結果のストリーミングチャンク
     """
+    # 入力検証
+    if not question or len(question.strip()) < 10:
+        yield type('ErrorChunk', (), {'text': "❌ 入力エラー: 問題が不足しています。"})()
+        return
+    
+    if not answer or len(answer.strip()) < 20:
+        yield type('ErrorChunk', (), {'text': "❌ 入力エラー: 回答を入力してください（最低20文字）。"})()
+        return
+    
+    # 採点開始時間記録
+    start_time = datetime.now()
+    full_response = ""
+    
     # リトライ機能付きの採点関数を定義
     def _score_medical_internal():
         prompt = f"""
@@ -135,18 +167,18 @@ def score_medical_answer_stream(question: str, answer: str):
 あなたは医学部採用試験の採点委員です。医師として実際に働く上で必要な知識と判断力を評価してください。
 以下の回答を、医学部採用試験の採点基準に沿って厳格に評価・添削してください。
 
-# 採点基準（各10点満点）
+# 採点基準（各25点満点）
 - **臨床的正確性**: 医学的事実の正確性と、実際の臨床現場での適用可能性
 - **実践的思考**: 臨床現場での判断力と問題解決能力
 - **包括性**: 問われている内容に対する網羅性と体系的な理解
 - **論理構成**: 文章の構成が論理的で、医師として適切な表現力があるか
 
 # 評価のポイント
-- 国試レベルを超えた実践的知識
-- 患者安全を考慮した判断
-- チーム医療での連携を意識した内容
-- Evidence-based medicineに基づく記述
-- 患者・家族への配慮
+- 日本の医師国家試験レベルの知識があるかどうか（病態生理は簡単でよい） 
+- 実践的思考：臨床現場での判断力と問題解決能力（学生実習として適切な内容）
+- 包括性：問われている内容に対する網羅性と体系的な理解（病態生理は簡単でよい）
+- 論理構成：文章の構成が論理的で、医師として適切な表現力があるか（学生実習として適切な内容）
+
 
 # 出力形式
 必ず以下の形式で、マークダウンを使用して出力してください。
@@ -196,13 +228,42 @@ def score_medical_answer_stream(question: str, answer: str):
             logger.error(f"Error scoring medical answer: {e}")
             raise e
     
-    # リトライ機能付きでストリーミング実行
+    # ストリーミング実行とレスポンス収集
     try:
-        yield from score_with_retry_stream(_score_medical_internal)
+        for chunk in score_with_retry_stream(_score_medical_internal):
+            if hasattr(chunk, 'text'):
+                full_response += chunk.text
+            yield chunk
     except Exception as e:
-        # 最終的にエラーが発生した場合
-        logger.error(f"Final error in score_medical_answer_stream: {e}")
-        yield from _create_error_stream(e)
+        yield type('ErrorChunk', (), {'text': f"❌ 医学知識チェックエラー: {str(e)}"})()
+        return
+    
+    # 採点完了後の処理
+    if save_to_db and full_response:
+        try:
+            # スコア解析
+            parsed_result = parse_medical_score_from_response(full_response)
+            
+            # 入力データ準備
+            inputs = {
+                'question': question,
+                'answer': answer
+            }
+            
+            # データベースに保存
+            save_medical_scoring_result(
+                inputs=inputs,
+                scores=parsed_result['scores'],
+                feedback=parsed_result['feedback']
+            )
+            
+        except Exception as e:
+            print(f"⚠️ 医学知識チェック結果保存エラー: {e}")
+    
+    # 採点時間の記録（オプション）
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"⏱️ 医学知識チェック時間: {duration:.2f}秒")
 
 def _is_theme_similar(theme1: str, theme2: str) -> bool:
     """
@@ -248,12 +309,13 @@ def _is_theme_similar(theme1: str, theme2: str) -> bool:
     return False
 
 @retry.Retry()
-def generate_random_medical_theme(avoid_themes: list = None) -> str:
+def generate_random_medical_theme(avoid_themes: List[str] = None, save_to_db: bool = True) -> str:
     """
     AIが医学部採用試験レベルの自由記述問題のテーマをランダムに1つ生成します。
     
     Args:
-        avoid_themes (list): 避けるべきテーマのリスト（過去に出題されたテーマなど）
+        avoid_themes (List[str]): 避けるべきテーマのリスト（過去に出題されたテーマなど）
+        save_to_db (bool): キーワード履歴に保存するかどうか
     
     Returns:
         str: 生成されたテーマ
@@ -321,6 +383,31 @@ def generate_random_medical_theme(avoid_themes: list = None) -> str:
                     break
             
             if not is_similar:
+                # キーワード履歴に保存
+                if save_to_db:
+                    try:
+                        from modules.database_v3 import db_manager_v3
+                        from modules.session_manager import session_manager
+                        
+                        # 現在のセッションIDを取得
+                        current_session = session_manager.get_user_session()
+                        session_id = current_session.session_id if hasattr(current_session, 'session_id') else None
+                        
+                        # 自由記述用のキーワード生成として保存
+                        success = db_manager_v3.save_keyword_generation(
+                            input_text="医学部採用試験 自由記述テーマ生成",
+                            generated_keywords=[generated_theme],
+                            exercise_type_id=11,  # keyword_generation_free
+                            session_id=session_id,
+                            ai_model="gemini-2.5-flash"
+                        )
+                        if success:
+                            logger.info(f"Saved theme generation to keyword history: {generated_theme}")
+                        else:
+                            logger.warning(f"Failed to save theme generation to keyword history: {generated_theme}")
+                    except Exception as e:
+                        logger.error(f"Error saving theme generation to keyword history: {e}")
+                
                 return generated_theme
             else:
                 logger.info(f"Generated theme '{generated_theme}' is similar to avoided themes. Retrying... (attempt {attempt + 1})")
@@ -350,14 +437,138 @@ def generate_random_medical_theme(avoid_themes: list = None) -> str:
                 break
         
         if not is_similar:
+            # フォールバックテーマもキーワード履歴に保存
+            if save_to_db:
+                try:
+                    from modules.database_v3 import db_manager_v3
+                    from modules.session_manager import session_manager
+                    
+                    # 現在のセッションIDを取得
+                    current_session = session_manager.get_user_session()
+                    session_id = current_session.session_id if hasattr(current_session, 'session_id') else None
+                    
+                    success = db_manager_v3.save_keyword_generation(
+                        input_text="医学部採用試験 自由記述テーマ生成（フォールバック）",
+                        generated_keywords=[fallback_theme],
+                        exercise_type_id=11,  # keyword_generation_free
+                        session_id=session_id,
+                        ai_model="gemini-2.5-flash"
+                    )
+                    if success:
+                        logger.info(f"Saved fallback theme generation to keyword history: {fallback_theme}")
+                    else:
+                        logger.warning(f"Failed to save fallback theme generation to keyword history: {fallback_theme}")
+                except Exception as e:
+                    logger.error(f"Error saving fallback theme generation to keyword history: {e}")
+            
             return fallback_theme
     
     return "フォールバックテーマの生成中にエラーが発生しました。"
 
-def get_default_themes():
+def parse_medical_score_from_response(response_text: str) -> Dict[str, Any]:
+    """
+    AI応答から医学知識チェックスコアを解析します。
+    
+    Args:
+        response_text (str): AIの応答テキスト
+        
+    Returns:
+        Dict[str, Any]: 解析されたスコアとフィードバック
+    """
+    try:
+        # JSONスコアの抽出
+        score_match = re.search(r'```json\s*({[^}]+})\s*```', response_text, re.DOTALL)
+        if score_match:
+            score_json = score_match.group(1)
+            scores = json.loads(score_json)
+        else:
+            # フォールバック: 数値の直接抽出
+            scores = {}
+            score_patterns = {
+                "臨床的正確性": r"臨床的正確性[：:]\s*(\d+)",
+                "実践的思考": r"実践的思考[：:]\s*(\d+)",
+                "包括性": r"包括性[：:]\s*(\d+)",
+                "論理構成": r"論理構成[：:]\s*(\d+)"
+            }
+            
+            for category, pattern in score_patterns.items():
+                match = re.search(pattern, response_text)
+                if match:
+                    scores[category] = int(match.group(1))
+        
+        # 総合評価レベルの抽出
+        level_match = re.search(r'レベル[：:]\s*([A-E])', response_text)
+        level = level_match.group(1) if level_match else "C"
+        
+        # 総合スコアの計算
+        total_score = sum(scores.values()) if scores else 0
+        
+        return {
+            'scores': scores,
+            'level': level,
+            'total_score': total_score,
+            'feedback': response_text,
+            'raw_response': response_text
+        }
+        
+    except Exception as e:
+        return {
+            'scores': {},
+            'level': 'C',
+            'total_score': 0,
+            'feedback': response_text,
+            'raw_response': response_text,
+            'parse_error': str(e)
+        }
+
+def save_medical_scoring_result(inputs: Dict[str, Any], scores: Dict[str, Any], 
+                              feedback: str, ai_model: str = 'gemini-2.5-flash') -> bool:
+    """
+    医学知識チェック結果をデータベースに保存します。
+    
+    Args:
+        inputs (Dict[str, Any]): 入力データ
+        scores (Dict[str, Any]): スコアデータ
+        feedback (str): フィードバック
+        ai_model (str): 使用したAIモデル
+        
+    Returns:
+        bool: 保存成功時True
+    """
+    try:
+        db_adapter = DatabaseAdapterV3()
+        
+        # 入力データの準備
+        input_data = {
+            'type': '医学知識チェック',
+            'date': str(datetime.now()),
+            'inputs': inputs,
+            'scores': scores,
+            'feedback': feedback,
+            'duration_seconds': 0  # 採点時間は別途計測が必要
+        }
+        
+        # データベースに保存
+        success = db_adapter.save_practice_history(input_data)
+        
+        if success:
+            print(f"✅ 医学知識チェック結果を保存しました")
+        else:
+            print(f"❌ 医学知識チェック結果の保存に失敗しました")
+        
+        return success
+        
+    except Exception as e:
+        print(f"❌ 医学知識チェック結果保存エラー: {e}")
+        return False
+
+def get_default_themes() -> List[str]:
     """
     医学部採用試験で頻出のデフォルト出題テーマをリストで返します。
     実際の過去問に基づいた実践的なテーマを収録。
+    
+    Returns:
+        List[str]: デフォルトテーマのリスト
     """
     return [
         # 循環器系

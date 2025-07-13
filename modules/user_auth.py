@@ -1,6 +1,8 @@
 """
 ユーザー認証管理システム
 パスワードベース認証、プロフィール管理、学習設定管理
+
+新スキーマ対応版 - カテゴリー別管理設計に対応
 """
 
 import hashlib
@@ -9,7 +11,7 @@ import uuid
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union
 from dataclasses import dataclass, asdict
 from enum import Enum
 import streamlit as st
@@ -103,7 +105,15 @@ class PasswordManager:
     
     @staticmethod
     def hash_password(password: str) -> str:
-        """パスワードをハッシュ化"""
+        """
+        パスワードをハッシュ化
+        
+        Args:
+            password: ハッシュ化するパスワード
+            
+        Returns:
+            ハッシュ化されたパスワード（ソルト付き）
+        """
         # ソルトを生成
         salt = secrets.token_hex(32)
         # パスワードとソルトを結合してハッシュ化
@@ -115,27 +125,53 @@ class PasswordManager:
     
     @staticmethod
     def verify_password(stored_password: str, provided_password: str) -> bool:
-        """パスワードを検証"""
-        # ソルトとハッシュを分離
-        salt = stored_password[:64]
-        stored_hash = stored_password[64:]
+        """
+        パスワードを検証
         
-        # 提供されたパスワードをハッシュ化
-        pwdhash = hashlib.pbkdf2_hmac('sha256',
-                                      provided_password.encode('utf-8'),
-                                      salt.encode('utf-8'),
-                                      100000)
-        
-        return pwdhash.hex() == stored_hash
+        Args:
+            stored_password: 保存されているハッシュ化パスワード
+            provided_password: 検証するパスワード
+            
+        Returns:
+            パスワードが一致するかどうか
+        """
+        try:
+            # ソルトとハッシュを分離
+            salt = stored_password[:64]
+            stored_hash = stored_password[64:]
+            
+            # 提供されたパスワードをハッシュ化
+            pwdhash = hashlib.pbkdf2_hmac('sha256',
+                                          provided_password.encode('utf-8'),
+                                          salt.encode('utf-8'),
+                                          100000)
+            
+            return pwdhash.hex() == stored_hash
+        except Exception as e:
+            logger.error(f"Password verification error: {e}")
+            return False
     
     @staticmethod
     def generate_reset_token() -> str:
-        """パスワードリセットトークンを生成"""
+        """
+        パスワードリセットトークンを生成
+        
+        Returns:
+            セキュアなリセットトークン
+        """
         return secrets.token_urlsafe(32)
     
     @staticmethod
     def validate_password_strength(password: str) -> Tuple[bool, List[str]]:
-        """パスワード強度を検証"""
+        """
+        パスワード強度を検証
+        
+        Args:
+            password: 検証するパスワード
+            
+        Returns:
+            (強度が十分かどうか, エラーメッセージのリスト)
+        """
         errors = []
         
         if len(password) < 8:
@@ -160,26 +196,57 @@ class EmailValidator:
     
     @staticmethod
     def is_valid_email(email: str) -> bool:
-        """メールアドレスの形式を検証"""
+        """
+        メールアドレスの形式を検証
+        
+        Args:
+            email: 検証するメールアドレス
+            
+        Returns:
+            有効なメールアドレスかどうか
+        """
         pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         return bool(re.match(pattern, email))
     
     @staticmethod
     def generate_verification_token() -> str:
-        """メール認証トークンを生成"""
+        """
+        メール認証トークンを生成
+        
+        Returns:
+            セキュアな認証トークン
+        """
         return secrets.token_urlsafe(32)
 
 class UserAuthManager:
     """ユーザー認証管理メインクラス"""
     
     def __init__(self, supabase_client: Client):
+        """
+        初期化
+        
+        Args:
+            supabase_client: Supabaseクライアント
+        """
         self.client = supabase_client
         self.password_manager = PasswordManager()
         self.email_validator = EmailValidator()
     
     def register_user(self, email: str, password: str, display_name: str, 
                      first_name: str = "", last_name: str = "") -> Tuple[bool, str, Optional[str]]:
-        """ユーザー登録"""
+        """
+        ユーザー登録
+        
+        Args:
+            email: メールアドレス
+            password: パスワード
+            display_name: 表示名
+            first_name: 名（オプション）
+            last_name: 姓（オプション）
+            
+        Returns:
+            (成功したかどうか, メッセージ, ユーザーID)
+        """
         try:
             # メールアドレス検証
             if not self.email_validator.is_valid_email(email):
@@ -234,7 +301,16 @@ class UserAuthManager:
             return False, f"登録エラー: {e}", None
     
     def login_user(self, email: str, password: str) -> Tuple[LoginResult, Optional[UserProfile], str]:
-        """ユーザーログイン"""
+        """
+        ユーザーログイン
+        
+        Args:
+            email: メールアドレス
+            password: パスワード
+            
+        Returns:
+            (ログイン結果, ユーザープロフィール, メッセージ)
+        """
         try:
             # ユーザー検索
             user_result = self.client.table('users').select('*').eq('email', email).execute()
@@ -299,7 +375,15 @@ class UserAuthManager:
             return LoginResult.INVALID_CREDENTIALS, None, f"ログインエラー: {e}"
     
     def logout_user(self, user_id: str) -> bool:
-        """ユーザーログアウト"""
+        """
+        ユーザーログアウト
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            ログアウトが成功したかどうか
+        """
         try:
             # アクティビティログ記録
             self._log_user_activity(user_id, 'logout', 'User logged out')
@@ -320,7 +404,15 @@ class UserAuthManager:
             return False
     
     def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
-        """ユーザープロフィール取得"""
+        """
+        ユーザープロフィール取得
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            ユーザープロフィール（見つからない場合はNone）
+        """
         try:
             result = self.client.table('users').select('*').eq('user_id', user_id).execute()
             
@@ -351,7 +443,16 @@ class UserAuthManager:
             return None
     
     def update_user_profile(self, user_id: str, profile_updates: Dict[str, Any]) -> Tuple[bool, str]:
-        """ユーザープロフィール更新"""
+        """
+        ユーザープロフィール更新
+        
+        Args:
+            user_id: ユーザーID
+            profile_updates: 更新するプロフィール情報
+            
+        Returns:
+            (成功したかどうか, メッセージ)
+        """
         try:
             # 更新可能フィールドのみ許可
             allowed_fields = {
@@ -379,7 +480,15 @@ class UserAuthManager:
             return False, f"更新エラー: {e}"
     
     def get_user_settings(self, user_id: str) -> Optional[UserSettings]:
-        """ユーザー設定取得"""
+        """
+        ユーザー設定取得
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            ユーザー設定（見つからない場合はNone）
+        """
         try:
             result = self.client.table('user_settings').select('*').eq('user_id', user_id).execute()
             
@@ -419,7 +528,16 @@ class UserAuthManager:
             return None
     
     def update_user_settings(self, user_id: str, settings: UserSettings) -> Tuple[bool, str]:
-        """ユーザー設定更新"""
+        """
+        ユーザー設定更新
+        
+        Args:
+            user_id: ユーザーID
+            settings: 更新する設定
+            
+        Returns:
+            (成功したかどうか, メッセージ)
+        """
         try:
             settings_dict = asdict(settings)
             settings_dict['updated_at'] = datetime.now().isoformat()
@@ -437,7 +555,17 @@ class UserAuthManager:
             return False, f"設定更新エラー: {e}"
     
     def change_password(self, user_id: str, current_password: str, new_password: str) -> Tuple[bool, str]:
-        """パスワード変更"""
+        """
+        パスワード変更
+        
+        Args:
+            user_id: ユーザーID
+            current_password: 現在のパスワード
+            new_password: 新しいパスワード
+            
+        Returns:
+            (成功したかどうか, メッセージ)
+        """
         try:
             # 現在のパスワード確認
             user_result = self.client.table('users').select('password_hash').eq('user_id', user_id).execute()
@@ -475,40 +603,38 @@ class UserAuthManager:
             return False, f"パスワード変更エラー: {e}"
     
     def get_user_achievements(self, user_id: str) -> List[UserAchievement]:
-        """ユーザー成果取得"""
-        try:
-            result = self.client.table('user_achievements').select('*').eq('user_id', user_id).eq('is_visible', True).order('earned_at', desc=True).execute()
+        """
+        ユーザー成果取得（現在は無効化）
+        
+        Args:
+            user_id: ユーザーID
             
-            achievements = []
-            for achievement_data in result.data:
-                achievements.append(UserAchievement(
-                    achievement_id=achievement_data['achievement_id'],
-                    achievement_type=achievement_data['achievement_type'],
-                    achievement_name=achievement_data['achievement_name'],
-                    achievement_description=achievement_data['achievement_description'],
-                    earned_at=datetime.fromisoformat(achievement_data['earned_at'].replace('Z', '+00:00')),
-                    badge_icon=achievement_data['badge_icon'],
-                    badge_color=achievement_data['badge_color'],
-                    points_earned=achievement_data['points_earned'],
-                    metadata=achievement_data['metadata'],
-                    is_visible=achievement_data['is_visible']
-                ))
-            
-            return achievements
-            
-        except Exception as e:
-            logger.error(f"Error getting user achievements: {e}")
-            return []
+        Returns:
+            ユーザー成果のリスト（現在は空リスト）
+        """
+        # 成果機能は現在無効化（user_achievementsテーブルが存在しないため）
+        # 将来的に実装する場合は、テーブル作成後にこの機能を有効化
+        return []
     
     def _handle_failed_login(self, email: str) -> None:
-        """ログイン失敗処理"""
+        """
+        ログイン失敗処理
+        
+        Args:
+            email: メールアドレス
+        """
         try:
             self.client.rpc('handle_failed_login', {'user_email': email}).execute()
         except Exception as e:
             logger.error(f"Error handling failed login: {e}")
     
     def _update_login_success(self, user_id: str) -> None:
-        """ログイン成功時の更新"""
+        """
+        ログイン成功時の更新
+        
+        Args:
+            user_id: ユーザーID
+        """
         try:
             self.client.table('users').update({
                 'last_login': datetime.now().isoformat(),
@@ -520,17 +646,28 @@ class UserAuthManager:
             logger.error(f"Error updating login success: {e}")
     
     def _log_user_activity(self, user_id: str, activity_type: str, description: str) -> None:
-        """ユーザーアクティビティログ"""
+        """
+        ユーザーアクティビティログ
+        
+        Args:
+            user_id: ユーザーID
+            activity_type: アクティビティタイプ
+            description: アクティビティ説明
+        """
         try:
+            # 一時的なユーザーID（temp_プレフィックス）の場合はログを記録しない
+            if user_id.startswith('temp_'):
+                logger.debug(f"Skipping activity log for temporary user: {user_id}")
+                return
+            
             # Streamlitから情報を取得（可能な限り）
             user_agent = st.get_option('server.headless')  # 簡略化
-            session_id = st.session_state.get('session_id', 'unknown')
             
             activity_data = {
                 'user_id': user_id,
                 'activity_type': activity_type,
                 'activity_description': description,
-                'session_id': session_id,
+                'session_id': None,  # session_idはNULLに設定（外部キー制約を回避）
                 'metadata': {
                     'user_agent': str(user_agent),
                     'timestamp': datetime.now().isoformat()
@@ -543,7 +680,12 @@ class UserAuthManager:
             logger.error(f"Error logging user activity: {e}")
     
     def _create_default_settings(self, user_id: str) -> None:
-        """デフォルト設定作成"""
+        """
+        デフォルト設定作成
+        
+        Args:
+            user_id: ユーザーID
+        """
         try:
             default_settings = asdict(UserSettings())
             default_settings['user_id'] = user_id
@@ -555,15 +697,20 @@ class UserAuthManager:
 # グローバルインスタンス（遅延初期化）
 _user_auth_manager = None
 
-def get_user_auth_manager() -> UserAuthManager:
-    """UserAuthManagerのシングルトンインスタンスを取得"""
+def get_user_auth_manager() -> Optional[UserAuthManager]:
+    """
+    UserAuthManagerのシングルトンインスタンスを取得
+    
+    Returns:
+        UserAuthManagerインスタンス（データベースが利用できない場合はNone）
+    """
     global _user_auth_manager
     
     if _user_auth_manager is None:
         try:
-            from modules.database_v2 import db_manager_v2
-            if db_manager_v2.is_available():
-                _user_auth_manager = UserAuthManager(db_manager_v2.client)
+            from modules.database_v3 import db_manager_v3
+            if db_manager_v3.is_available():
+                _user_auth_manager = UserAuthManager(db_manager_v3.client)
             else:
                 logger.warning("Database not available, user auth features disabled")
                 return None

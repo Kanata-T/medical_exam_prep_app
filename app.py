@@ -27,7 +27,10 @@ with col1:
 with col2:
     # ユーザー状態表示
     if current_session.is_authenticated and current_session.user_profile:
-        user_name = current_session.user_profile.get('display_name', 'ユーザー')
+        if hasattr(current_session.user_profile, 'display_name'):
+            user_name = current_session.user_profile.display_name
+        else:
+            user_name = 'ユーザー'
         st.success(f"👤 {user_name}")
         if st.button("📊 マイページ", use_container_width=True):
             st.switch_page("pages/07_ユーザー管理.py")
