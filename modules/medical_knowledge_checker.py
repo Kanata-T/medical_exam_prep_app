@@ -118,7 +118,7 @@ def generate_medical_question(theme: str) -> str:
 - clinical_assessment: 実際の臨床現場での判断能力を問う
 - differential_diagnosis: 鑑別診断の思考プロセスを問う
 - examination_procedure: 診察の手順や検査の選択理由を問う
-- treatment_plan: 治療の優先順位や選択理由を問う
+- treatment_plan: 一通りの治療法を記載する
 - diagnostic_criteria: 具体的な診断基準や数値を含める
 - complications: 予防策や早期発見のポイントを含める
 
